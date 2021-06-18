@@ -374,10 +374,10 @@ class PathForward(app_manager.RyuApp):
 
     @set_ev_cls(ofp_event.EventOFPFlowRemoved, MAIN_DISPATCHER)
     def flow_removed_handler(self, ev):
-        print('flow removed ............at time:', time.time())
         msg = ev.msg
         dp = msg.datapath
         ofp = dp.ofproto
+        print('flow removed ............at time:{}, switch {}'.format(time.time(),dp.id))
         if msg.reason == ofp.OFPRR_IDLE_TIMEOUT:
             reason = 'IDLE TIMEOUT'
         elif msg.reason == ofp.OFPRR_HARD_TIMEOUT:
@@ -410,7 +410,7 @@ class PathForward(app_manager.RyuApp):
             reason = 'GROUP DELETE'
         else:
             reason = 'unknown'
-        self.logger.debug('OFPFlowRemoved received: '
+        self.logger.info('OFPFlowRemoved received: '
                           'cookie=%d priority=%d reason=%s table_id=%d '
                           'duration_sec=%d duration_nsec=%d '
                           'idle_timeout=%d hard_timeout=%d '
@@ -615,12 +615,14 @@ class PathForward(app_manager.RyuApp):
     def add_flow1(self, datapath, priority, match, actions,idle_timeout=5, hard_timeout=0,flags=0):
         ofp = datapath.ofproto
         ofp_parser = datapath.ofproto_parser
-        # command = ofp.OFPFC_ADD
+        command = ofp.OFPFC_ADD
         inst = [ofp_parser.OFPInstructionActions(ofp.OFPIT_APPLY_ACTIONS, actions)]
-        req = ofp_parser.OFPFlowMod(datapath=datapath, priority=priority,
+        req = ofp_parser.OFPFlowMod(datapath=datapath, command=command,
+                                    priority=priority, match=match, instructions=inst,
                                 idle_timeout=idle_timeout,
                                 hard_timeout=hard_timeout,
-                                match=match, instructions=inst,flags=flags)
+                                flags=flags)
+        print('send flow mod to switch {}'.format(datapath.id))
         datapath.send_msg(req)
 
 
@@ -676,12 +678,28 @@ class PathForward(app_manager.RyuApp):
         if out_port==ofp.OFPP_FLOOD:
             # print('add host .................')
             return
-        actions = [ofp_parser.OFPActionOutput(out_port)]
 
+        actions = [ofp_parser.OFPActionOutput(out_port,ofp.OFPCML_NO_BUFFER)]
+        # if self.startMigration==False:
+        #     out_port = 1234
+        #     in_port = 1234
+        #     actions = [ofp_parser.OFPActionOutput(out_port,ofp.OFPCML_NO_BUFFER)]
+        #     match = ofp_parser.OFPMatch(in_port=in_port)
+        #     flags = ofp.OFPFF_SEND_FLOW_REM
+        #     self.add_flow1(datapath, 1, match, actions, flags=flags)
+        #     self.startMigration=True
         # 如果执行的动作不是flood，那么此时应该依据流表项进行转发操作，所以需要添加流表到交换机
-        # if out_port != ofp.OFPP_FLOOD:
-        #     match = ofp_parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
-        #     self.add_flow(datapath=datapath, priority=1, match=match, actions=actions)
+        if out_port != ofp.OFPP_FLOOD and isinstance(ip_pkt,ipv4.ipv4):
+            # print('add flow at switch {}'.format(datapath.id))
+            # print('match : in_port={}, ipv4_dst={}, ipv4_src={}'.format(in_port, dst, src))
+            match = ofp_parser.OFPMatch(in_port=in_port,eth_type=ether_types.ETH_TYPE_IP, ipv4_src=src, ipv4_dst=dst)
+            self.add_flow1(datapath=datapath, priority=1, match=match, actions=actions,flags=0)
+
+        if out_port != ofp.OFPP_FLOOD and isinstance(arp_pkt,arp.arp):
+            # print('add flow at switch {}'.format(datapath.id))
+            # print('match : in_port={}, ipv4_dst={}, ipv4_src={}'.format(in_port, dst, src))
+            match = ofp_parser.OFPMatch(in_port=in_port,eth_type=ether_types.ETH_TYPE_ARP, arp_spa=src, arp_tpa=dst)
+            self.add_flow1(datapath=datapath, priority=1, match=match, actions=actions,flags=0)
 
         data = None
         if msg.buffer_id == ofp.OFP_NO_BUFFER:
