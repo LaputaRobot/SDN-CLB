@@ -20,6 +20,7 @@ import json
 import math
 import pickle
 import sys
+import os
 #
 class PathForward(app_manager.RyuApp):
     OFP_VERSIONS = [ofproto_v1_3.OFP_VERSION]
@@ -37,10 +38,10 @@ class PathForward(app_manager.RyuApp):
         self.mac_to_port = {}
         self.datapaths = {}
         self.initRole = False
-        self.initedConNum = 0
-        self.firstInit=True
-        self.startTime = time.time()
-        print('开始于：{}'.format(self.startTime))
+        self.initedSWNum = 0
+        self.initedConNum=0
+        # self.startTime = time.time()
+        # print('开始于：{}'.format(self.startTime))
 
         self.send_queue = hub.Queue(16)
         self.socket = socket.socket()
@@ -91,18 +92,17 @@ class PathForward(app_manager.RyuApp):
                         self.localDatapathsRate[i]['packetInRate']=0
                     else:
                         self.send_role_request(dp, ofp.OFPCR_ROLE_SLAVE)
-                self.initRole = True
-                f = open('initedController', 'a+')
-                f.write(str(self.controllerId) + '\n')
-                f.close()
-                # result = os.popen('ps -ef|grep ryu-manager').readlines()
-                # processes = []
-                # for r in result:
-                #     if 'myApp' in r:
-                #         processes.append(r.split()[1])
-                # if len(processes) >= 2:
-                #     for p in processes:
-                #         os.system('cpulimit -p {} -l 10 &'.format(p))
+
+
+                myport = str(self.controllerId + 6652)
+                result = os.popen('ps -ef|grep ryu-manager').readlines()
+                for r in result:
+                    # print('result:', r)
+                    if myport in r:
+                        process = r.split()[1]
+                        print(process)
+                        os.system('cpulimit -p {} -l 10 &'.format(process))
+
             if self.initedConNum!=4:
                 f = open('initedController', 'r')
                 lines = f.readlines()
@@ -160,7 +160,7 @@ class PathForward(app_manager.RyuApp):
                 f=open('lock','r')
                 lock=f.readline()
                 f.close()
-                if myLoad>1000 and myLoad>avgLoad and not self.startMigration and lock=='False':
+                if myLoad>400 and myLoad>avgLoad and not self.startMigration and lock=='False':
                     f = open('lock', 'w')
                     f.write('True')
                     f.close()
@@ -225,7 +225,7 @@ class PathForward(app_manager.RyuApp):
         """
         监控消息队列，如果有消息，则发送出去
         """
-        print('self._send_loop()')
+        # print('self._send_loop()')
         try:
             while self.status:
                 message = self.send_queue.get()
@@ -244,7 +244,7 @@ class PathForward(app_manager.RyuApp):
             try:
                 message = self.socket.recv(128)
                 message = message.decode('utf-8')
-                print('receive msg1:',message)
+                # print('receive msg1:',message)
                 if len(message) == 0:  # 关闭连接
                     self.logger.info('connection fail, close')
                     self.status = False
@@ -450,8 +450,22 @@ class PathForward(app_manager.RyuApp):
                 print('请求到EQUAL')
         elif msg.role == ofp.OFPCR_ROLE_MASTER:
             role = 'MASTER'
+            if not self.initRole:
+                self.initedSWNum=self.initedSWNum+1
+                if self.initedSWNum==16:
+                    f = open('initedController', 'a+')
+                    f.write(str(self.controllerId) + '\n')
+                    f.close()
+                    self.initRole = True
         elif msg.role == ofp.OFPCR_ROLE_SLAVE:
             role = 'SLAVE'
+            if not self.initRole:
+                self.initedSWNum=self.initedSWNum+1
+                if self.initedSWNum==16:
+                    f = open('initedController', 'a+')
+                    f.write(str(self.controllerId) + '\n')
+                    f.close()
+                    self.initRole = True
         else:
             role = 'unknown'
         print('receive OFPRoleReply msg at', time.time())
@@ -616,20 +630,20 @@ class PathForward(app_manager.RyuApp):
         msg = ev.msg
         datapath = msg.datapath
 
-        if self.deleteFlag and self.fromController == True and datapath in self.requestDatapaths: # 如果是源控制器，在收到删除流表信息前，忽略消packet_in消息
-            print('忽略消息')
+        if self.deleteFlag and self.fromController == True and datapath in self.requestDatapaths: # 如果是源控制器，在收到删除流表信息后，忽略消packet_in消息
+            print('忽略消息 from switch {} at controller {}'.format(datapath.id,self.controllerId))
             return
             # 目标控制器
-        if not self.deleteFlag and self.toController == True and datapath in self.requestDatapaths: # 如果是目标控制器，在收到删除流表消息后，忽略消息Packet_IN消息
+        if not self.deleteFlag and self.toController == True and datapath in self.requestDatapaths: # 如果是目标控制器，在收到删除流表消息前，忽略消息Packet_IN消息
             # print(self.packetInCount)
-            print('暂时忽略')
+            print('忽略消息 from switch {} at controller {}'.format(datapath.id,self.controllerId))
             return
         if self.deleteFlag and \
                 self.toController == True and \
                 datapath in self.requestDatapaths and \
                 not self.endMigration:
             # print(self.packetInCount)
-            print('暂时缓存')
+            print('暂时缓存 from switch {} at controller {}'.format(datapath.id,self.controllerId))
             self.cachePacketIn.put(ev)
 
         ofp = datapath.ofproto
@@ -657,7 +671,7 @@ class PathForward(app_manager.RyuApp):
         if isinstance(ip_pkt,ipv4.ipv4):
             dst = ip_pkt.dst
             src = ip_pkt.src
-        print('packet in form {} to {} at {}'.format(src,dst,dpid))
+        # print('packet in form {} to {} at {}'.format(src,dst,dpid))
         out_port = self.get_out_port(datapath, src, dst, in_port)
         if out_port==ofp.OFPP_FLOOD:
             # print('add host .................')
