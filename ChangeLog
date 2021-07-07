@@ -1,5 +1,15 @@
 CHANGES
 =======
 
+* Update Authors file
+* Add scapy to README
+* Add lib folder to ryu project
+* Rename readme file in setup.cfg
+* Update script name in README
+* Remove unused file
+* removed virtual environment folder from repo
+* Add close.sh script to close ryu
+* .gitignore fix
+* Update general project files
 * Add gitignore and python requirements file
 * initial commit

@@ -86,9 +86,9 @@ class SimpleSwitch13(simple_switch_13.SimpleSwitch13):
         actions = [parser.OFPActionOutput(out_port)]
 
         # install a flow to avoid packet_in next time
-        if out_port != ofproto.OFPP_FLOOD:
-            match = parser.OFPMatch(in_port=in_port, eth_dst=dst)
-            self.add_flow(datapath, 1, match, actions)
+        # if out_port != ofproto.OFPP_FLOOD:
+        #     match = parser.OFPMatch(in_port=in_port, eth_dst=dst)
+        #     self.add_flow(datapath, 1, match, actions)
 
         data = None
         if msg.buffer_id == ofproto.OFP_NO_BUFFER:

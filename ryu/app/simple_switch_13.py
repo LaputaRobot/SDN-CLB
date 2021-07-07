@@ -29,6 +29,7 @@ class SimpleSwitch13(app_manager.RyuApp):
     def __init__(self, *args, **kwargs):
         super(SimpleSwitch13, self).__init__(*args, **kwargs)
         self.mac_to_port = {}
+        self.times=0
 
     @set_ev_cls(ofp_event.EventOFPSwitchFeatures, CONFIG_DISPATCHER)
     def switch_features_handler(self, ev):
@@ -65,12 +66,15 @@ class SimpleSwitch13(app_manager.RyuApp):
 
     @set_ev_cls(ofp_event.EventOFPPacketIn, MAIN_DISPATCHER)
     def _packet_in_handler(self, ev):
+        # print('receive in')
+
         # If you hit this you might want to increase
         # the "miss_send_length" of your switch
         if ev.msg.msg_len < ev.msg.total_len:
-            self.logger.debug("packet truncated: only %s of %s bytes",
+            self.logger.info("packet truncated: only %s of %s bytes",
                               ev.msg.msg_len, ev.msg.total_len)
         msg = ev.msg
+        # print(msg.dada)
         datapath = msg.datapath
         ofproto = datapath.ofproto
         parser = datapath.ofproto_parser
@@ -78,17 +82,26 @@ class SimpleSwitch13(app_manager.RyuApp):
 
         pkt = packet.Packet(msg.data)
         eth = pkt.get_protocols(ethernet.ethernet)[0]
+        self.times=self.times+1
+        if self.times%10==0:
+            print(self.mac_to_port)
+
+        if eth.ethertype==ether_types.ETH_TYPE_IPV6:
+            # print('ignore ipv6')
+            return
 
         if eth.ethertype == ether_types.ETH_TYPE_LLDP:
             # ignore lldp packet
+            # print('ignore lldp')
             return
+
         dst = eth.dst
         src = eth.src
 
         dpid = datapath.id
         self.mac_to_port.setdefault(dpid, {})
 
-        #self.logger.debug("packet in %s %s %s %s", dpid, src, dst, in_port)
+        self.logger.info("packet in %s %s %s %s", dpid, src, dst, in_port)
 
         # learn a mac address to avoid FLOOD next time.
         self.mac_to_port[dpid][src] = in_port
@@ -101,15 +114,15 @@ class SimpleSwitch13(app_manager.RyuApp):
         actions = [parser.OFPActionOutput(out_port)]
 
         # install a flow to avoid packet_in next time
-        if out_port != ofproto.OFPP_FLOOD:
-            match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
-            # verify if we have a valid buffer_id, if yes avoid to send both
-            # flow_mod & packet_out
-            if msg.buffer_id != ofproto.OFP_NO_BUFFER:
-                self.add_flow(datapath, 1, match, actions, msg.buffer_id)
-                return
-            else:
-                self.add_flow(datapath, 1, match, actions)
+        # if out_port != ofproto.OFPP_FLOOD:
+        #     match = parser.OFPMatch(in_port=in_port, eth_dst=dst, eth_src=src)
+        #     # verify if we have a valid buffer_id, if yes avoid to send both
+        #     # flow_mod & packet_out
+        #     if msg.buffer_id != ofproto.OFP_NO_BUFFER:
+        #         self.add_flow(datapath, 1, match, actions, msg.buffer_id)
+        #         return
+        #     else:
+        #         self.add_flow(datapath, 1, match, actions)
         data = None
         if msg.buffer_id == ofproto.OFP_NO_BUFFER:
             data = msg.data

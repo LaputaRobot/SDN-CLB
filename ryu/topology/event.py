@@ -92,7 +92,7 @@ class EventSwitchReply(event.EventReplyBase):
             (self.dst, self.switches)
 
 
-class EventLinkBase(event.EventBase):
+class  EventLinkBase(event.EventBase):
     def __init__(self, link):
         super(EventLinkBase, self).__init__()
         self.link = link
