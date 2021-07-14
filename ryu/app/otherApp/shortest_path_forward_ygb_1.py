@@ -1,15 +1,13 @@
-import collections
 import logging
-import random
 
 from ryu.base import app_manager
 from ryu.ofproto import ofproto_v1_3
 from ryu.controller import ofp_event
-from ryu.controller.handler import MAIN_DISPATCHER, CONFIG_DISPATCHER
+from ryu.controller.handler import MAIN_DISPATCHER, CONFIG_DISPATCHER, HANDSHAKE_DISPATCHER
 from ryu.controller.handler import set_ev_cls
 from ryu.topology.api import get_switch, get_link
 from ryu.topology import event
-from ryu.lib.packet import packet
+from ryu.lib.packet import packet, tcp
 from ryu.lib.packet import ethernet, ether_types, arp, ipv4
 from ryu.lib import hub
 
@@ -21,10 +19,10 @@ import my_load_balancer
 import json
 import math
 import pickle
-import sys
 import os
 import TOPSIS
 import pandas as pd
+import lock
 
 
 #
@@ -46,7 +44,7 @@ class PathForward(app_manager.RyuApp):
         self.initRole = False
         self.initedSWNum = 0
         self.initedConNum = 0
-        self.initCon=0
+        self.initCon = 0
         # self.startTime = time.time()
         # print('开始于：{}'.format(self.startTime))
 
@@ -56,20 +54,21 @@ class PathForward(app_manager.RyuApp):
         print('start_serve')
 
         self.monitor_thread = hub.spawn(self._monitor)
-        self.get_Ram=hub.spawn(self._getRam)
-        self.lastMonitorTime=time.time()
+        self.get_Ram = hub.spawn(self._getRam)
+        self.lastMonitorTime = time.time()
         self.packetInRate = 0
         self.packetInCount = 0
         self.lastPacketInCount = 0
 
-        self.respondTime=0
-
+        self.respondTime = 0
 
         self.localDatapaths = {}
         self.localDatapathsRate = {}
-        self.otherRAM={}
+        self.otherRAM = {}
 
-        # {dpid:{ethe_adress: port,...},...}
+        self.dpFlowTableNum = {} #交换机的流表数
+        self.eachFlowData={}
+        # {dpid:{ethe_address: port,...},...}
         # 控制器通信相关
 
         # barrier相关
@@ -77,6 +76,9 @@ class PathForward(app_manager.RyuApp):
         # 迁移过程变量
         self.startMigration = False  # 开始迁移的标志
         self.deleteFlag = False  # 收到删除流表的标志
+        self.otherDel=False
+        self.srcSlave = False
+
         self.endMigration = False  # 结束迁移
         self.requestControllerID = 0  # 请求迁移的控制器
         self.requestDatapaths = []  # 请求迁移的交换机列表
@@ -90,7 +92,7 @@ class PathForward(app_manager.RyuApp):
         """
         while True:
             # print("start monitor at {}".format(time.time()))
-            if not self.initRole and self.sendPath and self.initCon==0:
+            if not self.initRole and self.sendPath and self.initCon == 0:
                 dp1 = self.datapaths[1]
                 ofp = dp1.ofproto
                 print('分配交换机')
@@ -104,19 +106,28 @@ class PathForward(app_manager.RyuApp):
                         self.localDatapathsRate[i]['lastPacketInCount'] = 0
                         self.localDatapathsRate[i]['packetInCount'] = 0
                         self.localDatapathsRate[i]['packetInRate'] = 0
-                        self.localDatapathsRate[i]['packetInRateWind']= []
+                        self.localDatapathsRate[i]['packetInRateWind'] = []
+                        numDict = {'this num': 0,
+                                   'sum num': 0,
+                                   'times': 0,
+                                   'avg num': 0}
+                        self.dpFlowTableNum[i] = numDict
                     else:
                         self.send_role_request(dp, ofp.OFPCR_ROLE_SLAVE)
 
-                self.initCon=self.initCon+1
+                self.initCon = self.initCon + 1
                 myport = str(self.controllerId + 6652)
+                print('cgroup to limit controller cpu')
                 result = os.popen('ps -ef|grep ryu-manager').readlines()
                 for r in result:
                     # print('result:', r)
                     if myport in r:
                         process = r.split()[1]
                         print(process)
-                        os.system('echo {} |sudo tee /sys/fs/cgroup/cpu/controller{}/tasks'.format(process,self.controllerId))
+                        os.system('echo {} |sudo tee /sys/fs/cgroup/cpu/controller{}/tasks'.format(process,
+                                                                                                   self.controllerId))
+
+                self.get_Table_Num = hub.spawn(self._getTableNum)
 
             if self.initedConNum != 4:
                 f = open('initedController', 'r')
@@ -132,15 +143,17 @@ class PathForward(app_manager.RyuApp):
                     self.localDatapathsRate[dpId]['lastPacketInCount'] = self.localDatapathsRate[dpId]['packetInCount']
                     thisRate = delta / (time.time() - self.lastMonitorTime)
 
-                    # if len(self.localDatapathsRate[dpId]['packetInRateWind']) >= 6:
-                    #     self.localDatapathsRate[dpId]['packetInRateWind'].pop(0)
-                    #     self.localDatapathsRate[dpId]['packetInRateWind'].append(thisRate)
-                    # else:
-                    #     self.localDatapathsRate[dpId]['packetInRateWind'].append(thisRate)
-                    # self.localDatapathsRate[dpId]['packetInRate']=sum(self.localDatapathsRate[dpId]['packetInRateWind'])/len(self.localDatapathsRate[dpId]['packetInRateWind'])
-                    self.localDatapathsRate[dpId]['packetInRate']=thisRate
+                    if len(self.localDatapathsRate[dpId]['packetInRateWind']) >= 3:
+                        self.localDatapathsRate[dpId]['packetInRateWind'].pop(0)
+                        self.localDatapathsRate[dpId]['packetInRateWind'].append(thisRate)
+                    else:
+                        self.localDatapathsRate[dpId]['packetInRateWind'].append(thisRate)
+                    self.localDatapathsRate[dpId]['packetInRate'] = sum(
+                        self.localDatapathsRate[dpId]['packetInRateWind']) / len(
+                        self.localDatapathsRate[dpId]['packetInRateWind'])
+                    # self.localDatapathsRate[dpId]['packetInRate']=thisRate
 
-                self.lastMonitorTime=time.time()
+                self.lastMonitorTime = time.time()
                 fileData = {self.controllerId: self.localDatapathsRate}
 
                 # print('写入：{}'.format(fileData))
@@ -175,34 +188,38 @@ class PathForward(app_manager.RyuApp):
                         print(e)
                         # print('')
                 avgLoad = (myLoad + sum(otherLoads.values())) / 4
-                LBR=0
-                if avgLoad!=0:
-                    LBR=1-(abs(myLoad-avgLoad)+sum(abs(v-avgLoad) for v in otherLoads.values()))/(4*avgLoad)
+                LBR = 0
+                if avgLoad != 0:
+                    LBR = 1 - (abs(myLoad - avgLoad) + sum(abs(v - avgLoad) for v in otherLoads.values())) / (
+                                4 * avgLoad)
                 print('myLoad: ', myLoad)
                 print('detail:', self.localDatapathsRate)
                 print('otherLoads: ', otherLoads)
                 print('respondTime: ', self.respondTime)
-                print('LBR: ',LBR)
-                self.respondTimelogger.info("{},{},{},{},{},{}".format(time.time(), self.respondTime,myLoad,LBR,self.controllerId,otherLoads))
-                self.respondTime=0
+                print('LBR: ', LBR)
+                print('Table Num: ', self.dpFlowTableNum)
+
+                self.respondTimelogger.info(
+                    "{},{},{},{},{},{}".format(time.time(), self.respondTime, myLoad, LBR, self.controllerId,
+                                               otherLoads))
+                self.respondTime = 0
                 # if myLoad>avgLoad+100:
                 #     print('controller {} is overLoad!'.format(self.controllerId))
                 # print('离开监控：at {}'.format(time.time()))
 
-                f = open('lock', 'r')
-                lock = f.readline()
-                f.close()
-                if myLoad > 50 and myLoad > avgLoad and not self.startMigration and lock == 'False' and len(otherLoads.keys())==3:
-                    f = open('lock', 'w')
-                    f.write('True')
-                    f.close()
+                if myLoad > 130 and myLoad > avgLoad and not self.startMigration and len(
+                        otherLoads.keys()) == 3 and lock.get_lock(True):
+
                     # 发现超载，向目标控制器发送迁移请求
+
                     datapathId = 0
                     rate = 10000
                     for switch in self.localDatapathsRate.keys():
-                        if self.localDatapathsRate[switch]['packetInRate'] < rate:
+                        if 15< self.localDatapathsRate[switch]['packetInRate'] < rate:
                             datapathId = switch
                             rate = self.localDatapathsRate[switch]['packetInRate']
+                    if datapathId==0:
+                        datapathId=self.localDatapathsRate.keys()[0]
                     self.requestDatapaths.append(self.datapaths[datapathId])
                     self.startMigration = True
                     self.fromController = True
@@ -214,20 +231,25 @@ class PathForward(app_manager.RyuApp):
                     # for i in range(1, 5):
                     #     if i != self.controllerId:
                     #         otherControllerId.append(i)
-                    start=time.time()
-                    otherHop=TOPSIS.getOtherHop(str(datapathId),str(self.controllerId))
-                    dataD = {'CPU': [v+0.1 for v in otherLoads.values()], 'RAM': [v for v in self.otherRAM.values()],
+                    start = time.time()
+                    otherHop = TOPSIS.getOtherHop(str(datapathId), str(self.controllerId))
+                    dataD = {'CPU': [v + 0.1 for v in otherLoads.values()], 'RAM': [v for v in self.otherRAM.values()],
                              'hop': [v for v in otherHop.values()]}
                     index = [k for k in otherHop.keys()]
                     data = pd.DataFrame(dataD, index=index)
                     data['CPU'] = 1 / data['CPU']
                     data['RAM'] = 1 / data['RAM']
                     data['hop'] = 1 / data['hop']
-                    print('time spend at get data:',time.time()-start )
-                    self.dstController=int(TOPSIS.esmlb(data,TOPSIS.WEIGHT))
+                    print('time spend at get data:', time.time() - start)
+                    self.dstController = int(TOPSIS.esmlb(data, TOPSIS.WEIGHT))
                     # self.dstController = random.choice(otherControllerId)
 
-                    self.respondTimelogger.info('{},migration switch{} from {} to {}, get controller spend time {}'.format(time.time(),datapathId,self.controllerId,self.dstController,time.time()-start))
+                    self.respondTimelogger.info(
+                        '{},migration switch{} from {} to {}, get controller spend time {}'.format(time.time(),
+                                                                                                   datapathId,
+                                                                                                   self.controllerId,
+                                                                                                   self.dstController,
+                                                                                                   time.time() - start))
                     message = json.dumps({'srcController': self.controllerId,
                                           'dstController': self.dstController, 'startMigration': 'True',
                                           'datapath': datapathId
@@ -235,6 +257,42 @@ class PathForward(app_manager.RyuApp):
                     self.send(message)
 
             hub.sleep(0.5)
+
+    def _getTableNum(self):
+        while True:
+            try:
+                if self.startMigration!=True:
+                    # print('get flow table number!!!')
+                    for dp_id in self.dpFlowTableNum.keys():
+                        print('get switch {} table num '.format(dp_id))
+                        num = int(os.popen('sudo ovs-ofctl dump-flows s{} |wc -l'.format(dp_id)).readline().split()[0])
+                        print('result is ',num)
+                        sumNum = self.dpFlowTableNum[dp_id]['sum num'] + num
+                        times = self.dpFlowTableNum[dp_id]['times'] + 1
+                        avgNum = sumNum / times
+                        numDict = {'this num': num,
+                                   'sum num': sumNum,
+                                   'times': times,
+                                   'avg num': avgNum}
+                        self.dpFlowTableNum[dp_id] = numDict
+                time.sleep(0.5)
+            except Exception as e:
+                print(e)
+
+    def getTableNum(self,dp_id):
+        start=time.time()
+        print('get switch {} table num at {}'.format(dp_id,start))
+        num = int(os.popen('sudo ovs-ofctl dump-flows s{} |wc -l'.format(dp_id)).readline().split()[0])
+        print('spend time ',time.time()-start)
+        print('result is ', num)
+        sumNum = self.dpFlowTableNum[dp_id]['sum num'] + num
+        times = self.dpFlowTableNum[dp_id]['times'] + 1
+        avgNum = sumNum / times
+        numDict = {'this num': num,
+                   'sum num': sumNum,
+                   'times': times,
+                   'avg num': avgNum}
+        self.dpFlowTableNum[dp_id] = numDict
 
     def _getRam(self):
         while True:
@@ -283,6 +341,25 @@ class PathForward(app_manager.RyuApp):
         finally:
             self.send_queue = None
 
+    def rece_slave(self):
+        try:
+            message = self.socket.recv(128)
+            message = message.decode('utf-8')
+            # print('receive msg1:',message)
+            if len(message) == 0:  # 关闭连接
+                self.logger.info('connection fail, close')
+            while '\n' != message[-1]:
+                message += self.socket.recv(128).decode('utf-8')
+            print('receive msg:', message)
+            messageDict = eval(message)
+
+            if 'slave' in messageDict.keys():
+                if messageDict['slave'] == 'True':
+                    self.srcSlave = True
+
+        except ValueError:
+            print(('Value error for %s, len: %d', message, len(message)))
+
     def _rece_loop(self):
         """
         控制器接收消息，并分析消息类型，以作进一步处理
@@ -325,9 +402,11 @@ class PathForward(app_manager.RyuApp):
                         # 将交换机换成列表的形式
                         dp = self.datapaths[messageDict['datapath']]
                         self.requestDatapaths.append(dp)
-                        self.respondTimelogger.info('{},dst controller receive mig request at switch {} from controller {}'.format(time.time(),
-                                                                                                                                   messageDict['datapath'],
-                                                                                                                                   self.requestControllerID))
+                        self.respondTimelogger.info(
+                            '{},dst controller receive mig request at switch {} from controller {}'.format(time.time(),
+                                                                                                           messageDict[
+                                                                                                               'datapath'],
+                                                                                                           self.requestControllerID))
                         # ofp_parse=dp.ofproto_parser
                         ofp = dp.ofproto
                         self.send_role_request(dp, ofp.OFPCR_ROLE_EQUAL)
@@ -344,10 +423,16 @@ class PathForward(app_manager.RyuApp):
                         actions = [ofp_parse.OFPActionOutput(out_port)]
                         match = ofp_parse.OFPMatch(in_port=in_port)
                         flags = ofp.OFPFF_SEND_FLOW_REM
-                        self.add_flow1(dp, 1, match, actions,idle_timeout=0, flags=flags)
+                        self.add_flow1(dp, 1, match, actions, idle_timeout=0, flags=flags)
                         self.barrier_reply_Count = 0
                         self.send_barrier_request(dp)
                         print('安装空流表，发送barrier消息 at {}'.format(time.time()))
+
+                if 'delFlowTable' in messageDict.keys():
+                    if messageDict['delFlowTable']=='True':
+                        self.otherDel=True
+
+
 
                 if 'cmd' in messageDict.keys():
                     if messageDict['cmd'] == 'set_id':
@@ -373,16 +458,19 @@ class PathForward(app_manager.RyuApp):
                         ofp = dp.ofproto
                         self.send_role_request(dp, ofp.OFPCR_ROLE_MASTER)
                         print('请求到MASTER')
-                        print('处理缓存的消息')
+                        print('迁移后获取各交换机流表')
+                        self.getTableNum(dpid)
+
                         self.fromController = False
                         self.toController = False
+                        print('处理缓存的消息')
                         while not self.cachePacketIn.empty():
                             ev = self.cachePacketIn.get()
                             self.cache_packet_in_handler(ev)
+                        while self.srcSlave==False:
+                            self.rece_slave()
                         print('处理完成，结束迁移')
-                        f = open('lock', 'w')
-                        f.write('False')
-                        f.close()
+                        lock.write_lock()
                         self.respondTimelogger.info('{},end migration'.format(time.time()))
                         # self.requestDatapaths.remove(dp)
                         self.startMigration = False  # 开始迁移的标志
@@ -390,6 +478,7 @@ class PathForward(app_manager.RyuApp):
                         self.endMigration = False  # 结束迁移
                         self.requestControllerID = 0  # 请求迁移的控制器
                         self.requestDatapaths = []
+                        self.srcSlave=False
 
             except ValueError:
                 print(('Value error for %s, len: %d', message, len(message)))
@@ -438,21 +527,35 @@ class PathForward(app_manager.RyuApp):
         elif msg.reason == ofp.OFPRR_DELETE:
             reason = 'DELETE'
             if self.startMigration == True:
-                self.deleteFlag = True
                 if self.toController == True:
+                    self.deleteFlag = True
                     self.localDatapaths[dp.id] = dp
                     self.localDatapathsRate.setdefault(dp.id, {})
                     self.localDatapathsRate[dp.id]['lastPacketInCount'] = 0
                     self.localDatapathsRate[dp.id]['packetInCount'] = 0
                     self.localDatapathsRate[dp.id]['packetInRate'] = 0
-                    self.localDatapathsRate[dp.id]['packetInRateWind']=[]
+                    self.localDatapathsRate[dp.id]['packetInRateWind'] = []
+                    numDict = {'this num': 0,
+                               'sum num': 0,
+                               'times': 0,
+                               'avg num': 0}
+                    self.dpFlowTableNum[dp.id] = numDict
+                    delMsg=json.dumps({'dstController': self.requestControllerID,
+                                'srcController': self.controllerId,
+                                'delFlowTable': 'True', "datapath": dp.id})
+                    self.send(delMsg)
 
                 if self.fromController == True:
-                    self.localDatapathsRate.pop(dp.id)
                 # self.file.write('{},{}\n'.format(time.time(), '已删除空流表'))
                 # self.file.flush()
-                print('流表已删除，进入backout......at ', time.time())
-                self.send_barrier_request(dp)
+                    while  self.otherDel!=True:
+                        time.sleep(0.05)
+                    self.deleteFlag = True
+                    self.localDatapathsRate.pop(dp.id)
+                    self.dpFlowTableNum.pop(dp.id)
+                    print('本控制器流表删除状态：{}, 其他控制器删除状态：{}'.format(self.deleteFlag,self.otherDel))
+                    print('流表已删除，进入backout......at ', time.time())
+                    self.send_barrier_request(dp)
                 # time.sleep(5.310)
                 # self.deleteFlag=False
                 # print('结束迁移 at',time.time())
@@ -482,6 +585,18 @@ class PathForward(app_manager.RyuApp):
         req = ofp_parser.OFPRoleRequest(datapath, role, gen_id)
         datapath.send_msg(req)
 
+    @set_ev_cls(ofp_event.EventOFPErrorMsg,
+                [HANDSHAKE_DISPATCHER, CONFIG_DISPATCHER, MAIN_DISPATCHER])
+    def error_msg_handler(self, ev):
+        msg = ev.msg
+        dp=msg.datapath
+        if dp in self.requestDatapaths and \
+            msg.type==ofproto_v1_3.OFPET_ROLE_REQUEST_FAILED and \
+            msg.code==ofproto_v1_3.OFPRRFC_STALE:
+            self.send_role_request(dp, ofproto_v1_3.OFPCR_ROLE_SLAVE)
+        self.logger.info('OFPErrorMsg received: type=0x%02x code=0x%02x ',
+                      msg.type, msg.code)
+
     @set_ev_cls(ofp_event.EventOFPRoleReply, MAIN_DISPATCHER)
     def role_reply_handler(self, ev):
         msg = ev.msg
@@ -504,7 +619,7 @@ class PathForward(app_manager.RyuApp):
             if not self.initRole:
                 self.initedSWNum = self.initedSWNum + 1
                 if self.initedSWNum == 16:
-                    print('controller {}  initialized at {}'.format(self.controllerId,time.time()))
+                    print('controller {}  initialized at {}'.format(self.controllerId, time.time()))
                     f = open('initedController', 'a+')
                     f.write(str(self.controllerId) + '\n')
                     f.close()
@@ -514,11 +629,27 @@ class PathForward(app_manager.RyuApp):
             if not self.initRole:
                 self.initedSWNum = self.initedSWNum + 1
                 if self.initedSWNum == 16:
-                    print('controller {}  initialized at {}'.format(self.controllerId,time.time()))
+                    print('controller {}  initialized at {}'.format(self.controllerId, time.time()))
                     f = open('initedController', 'a+')
                     f.write(str(self.controllerId) + '\n')
                     f.close()
                     self.initRole = True
+
+            if self.fromController == True and dp in self.requestDatapaths:
+                slaveMessage = json.dumps({'dstController': self.dstController,
+                                           'srcController': self.controllerId,
+                                           'slave': 'True', "datapath": dpid})
+                self.send(slaveMessage)
+                self.startMigration = False  # 开始迁移的标志
+                self.deleteFlag = False  # 收到删除流表的标志
+                self.otherDel = False
+                self.endMigration = False  # 结束迁移
+                self.requestControllerID = 0  # 请求迁移的控制器
+                self.requestDatapaths = []
+                self.fromController = False
+                self.toController = False
+                self.dstController = 0
+                self.respondTimelogger.info('{},src controller end migration'.format(time.time()))
         else:
             role = 'unknown'
         print('receive OFPRoleReply msg at', time.time())
@@ -536,16 +667,17 @@ class PathForward(app_manager.RyuApp):
 
     @set_ev_cls(ofp_event.EventOFPBarrierReply, MAIN_DISPATCHER)
     def barrier_reply_handler(self, ev):
+        self.logger.info('OFPBarrierReply received')
         dp = ev.msg.datapath
         ofp_parse = dp.ofproto_parser
         ofp = dp.ofproto
         self.barrier_reply_Count = self.barrier_reply_Count + 1
-        if self.barrier_reply_Count == 1 and self.startMigration == True and self.fromController==True:
-            print('删除空流表————delete dummy flow at {} by controller {}'.format(time.time(),self.controllerId))
+        if self.barrier_reply_Count == 1 and self.startMigration == True and self.fromController == True:
+            print('删除空流表————delete dummy flow at {} by controller {}'.format(time.time(), self.controllerId))
             match = ofp_parse.OFPMatch(in_port=1234)
             self.del_flow(dp, match)
-        if self.barrier_reply_Count == 2 and self.startMigration == True and self.fromController==True:
-            print('第二次barrier reply at {} at controller {}'.format(time.time(),self.controllerId) )
+        if self.barrier_reply_Count == 2 and self.startMigration == True and self.fromController == True:
+            print('第二次barrier reply at {} at controller {}'.format(time.time(), self.controllerId))
             # time.sleep(5)
             # self.file.write('{},{}\n'.format(time.time(), '结束迁移'))
             # self.file.flush()
@@ -555,19 +687,12 @@ class PathForward(app_manager.RyuApp):
                                           'endMigration': 'True',
                                           'datapath': dp.id})
             self.send(endMigrationMsg)
-            self.startMigration = False  # 开始迁移的标志
-            self.deleteFlag = False  # 收到删除流表的标志
-            self.endMigration = False  # 结束迁移
-            self.requestControllerID = 0  # 请求迁移的控制器
-            self.requestDatapaths = []
-            self.fromController = False
-            self.toController = False
-            self.dstController = 0
-            print('请求为SLAVE')
+            print('源控制器发送SLAVE请求')
             self.send_role_request(dp, ofp.OFPCR_ROLE_SLAVE)
-            self.respondTimelogger.info('{},src controller end migration'.format(time.time()))
 
-        self.logger.info('OFPBarrierReply received')
+
+
+
 
     # 当控制器和交换机开始的握手动作完成后，进行table-miss(默认流表)的添加
     # 关于这一段代码的详细解析，参见：https://blog.csdn.net/weixin_40042248/article/details/115749340
@@ -682,10 +807,16 @@ class PathForward(app_manager.RyuApp):
         self.packetInTime = time.time()
         msg = ev.msg
         datapath = msg.datapath
+        ofp = datapath.ofproto
 
-        if self.deleteFlag and self.fromController == True and datapath in self.requestDatapaths:  # 如果是源控制器，在收到删除流表信息后，忽略消packet_in消息
-            print('忽略消息 from switch {} at controller {}'.format(datapath.id, self.controllerId))
-            return
+        if self.deleteFlag and self.fromController==True and datapath in self.requestDatapaths:  # 如果是源控制器，在收到删除流表信息后，忽略消packet_in消息
+            if self.barrier_reply_Count == 1 and self.startMigration == True :
+                print('忽略消息 from switch {} at controller {}'.format(datapath.id, self.controllerId))
+                return
+            # if self.barrier_reply_Count == 2 and self.startMigration == True :
+            #     print('请求为SLAVE from switch {} at controller {}'.format(datapath.id, self.controllerId))
+            #     self.send_role_request(datapath, ofp.OFPCR_ROLE_SLAVE)
+            #     return
             # 目标控制器
         if not self.deleteFlag and self.toController == True and datapath in self.requestDatapaths:  # 如果是目标控制器，在收到删除流表消息前，忽略消息Packet_IN消息
             # print(self.packetInCount)
@@ -698,8 +829,8 @@ class PathForward(app_manager.RyuApp):
             # print(self.packetInCount)
             print('暂时缓存 from switch {} at controller {}'.format(datapath.id, self.controllerId))
             self.cachePacketIn.put(ev)
+            return
 
-        ofp = datapath.ofproto
         ofp_parser = datapath.ofproto_parser
 
         dpid = datapath.id
@@ -713,10 +844,8 @@ class PathForward(app_manager.RyuApp):
             return
         arp_pkt = pkt.get_protocol(arp.arp)
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
+        tcp_pkt = pkt.get_protocol(tcp.tcp)
         # print(pkt)
-        if datapath.id in self.localDatapathsRate.keys():
-            self.localDatapathsRate[datapath.id]['packetInCount'] = self.localDatapathsRate[datapath.id][
-                                                                        'packetInCount'] + 1
 
         if isinstance(arp_pkt, arp.arp):
             dst = arp_pkt.dst_ip
@@ -724,13 +853,22 @@ class PathForward(app_manager.RyuApp):
         if isinstance(ip_pkt, ipv4.ipv4):
             dst = ip_pkt.dst
             src = ip_pkt.src
+        if isinstance(tcp_pkt, tcp.tcp):
+            tcp_srcp = tcp_pkt.src_port
+            tcp_dstp = tcp_pkt.dst_port
+
+        flow=(src,dst,tcp_srcp,tcp_dstp)
+        if datapath.id in self.localDatapathsRate.keys():
+            self.localDatapathsRate[datapath.id]['packetInCount'] = self.localDatapathsRate[datapath.id][
+                                                                        'packetInCount'] + 1
+
         # print('{}, packet in form {} to {} at {}'.format(self.packetInTime,src,dst,dpid))
         out_port = self.get_out_port(datapath, src, dst, in_port)
         if out_port == ofp.OFPP_FLOOD:
             # print('add host .................')
             return
 
-        hopDelay = TOPSIS.HOP[str(dpid)][str(self.controllerId)] / 100
+        # hopDelay = TOPSIS.HOP[str(dpid)][str(self.controllerId)] / 100
         # print('hopDelay : {}'.format(hopDelay))
         # time.sleep(hopDelay)
 
@@ -748,13 +886,25 @@ class PathForward(app_manager.RyuApp):
         #     # print('add flow at switch {}'.format(datapath.id))
         #     # print('match : in_port={}, ipv4_dst={}, ipv4_src={}'.format(in_port, dst, src))
         #     match = ofp_parser.OFPMatch(in_port=in_port,eth_type=ether_types.ETH_TYPE_IP, ipv4_src=src, ipv4_dst=dst)
-        #     self.add_flow1(datapath=datapath, priority=1, match=match, idle_timeout=0,actions=actions,flags=0)
-        #
+        #     self.add_flow1(datapath=datapath, priority=1, match=match, idle_timeout=5,actions=actions,flags=0)
+
+        if self.initRole and \
+                20 > self.dpFlowTableNum[dpid]['this num'] > 0 and \
+                out_port != ofp.OFPP_FLOOD and isinstance(tcp_pkt, tcp.tcp):
+            self.dpFlowTableNum[dpid]['this num']+=1
+            match = ofp_parser.OFPMatch(in_port=in_port, eth_type=ether_types.ETH_TYPE_IP, ip_proto=6, ipv4_src=src,
+                                        ipv4_dst=dst, tcp_src=tcp_srcp, tcp_dst=tcp_dstp)
+            self.add_flow1(datapath=datapath, priority=1, match=match, idle_timeout=5, actions=actions, flags=0)
+
+            # print('add flow at switch {}'.format(datapath.id))
+            # print('match : in_port={}, ipv4_dst={}, ipv4_src={}'.format(in_port, dst, src))
+
+
         # if out_port != ofp.OFPP_FLOOD and isinstance(arp_pkt,arp.arp):
         #     # print('add flow at switch {}'.format(datapath.id))
         #     # print('match : in_port={}, ipv4_dst={}, ipv4_src={}'.format(in_port, dst, src))
         #     match = ofp_parser.OFPMatch(in_port=in_port,eth_type=ether_types.ETH_TYPE_ARP, arp_spa=src, arp_tpa=dst)
-        #     self.add_flow1(datapath=datapath, priority=1, match=match, idle_timeout=0,actions=actions,flags=0)
+        #     self.add_flow1(datapath=datapath, priority=1, match=match, idle_timeout=5,actions=actions,flags=0)
 
         data = None
         if msg.buffer_id == ofp.OFP_NO_BUFFER:
@@ -766,7 +916,7 @@ class PathForward(app_manager.RyuApp):
         respondTime = time.time() - self.packetInTime
 
         if respondTime > self.respondTime:
-            self.respondTime=respondTime
+            self.respondTime = respondTime
             print('respond time is {}'.format(self.respondTime))
 
     def cache_packet_in_handler(self, ev):
