@@ -75,18 +75,28 @@ def runClient(net):
         host = clients['h%d' % i]
         host.cmd('iperf -s -u &')
         print("run iperf server at 10.0.0.{}".format(i))
-        if (math.ceil(i/4)==1 or math.ceil(i/4)==3):
-            host.cmd('/home/ygb/ESMLB/Ryu-venv/bin/python3 iperf4.py {} &'.format(i))
-            print('run iperf client at 10.0.0.{} '.format(i))
-            print('ok')
+        # if (math.ceil(i/4)==1 or math.ceil(i/4)==3):
+        #     host.cmd('/home/ygb/ESMLB/Ryu-venv/bin/python3 iperf4.py {} &'.format(i))
+        #     print('run iperf client at 10.0.0.{} '.format(i))
+        #     print('ok')
+        host.cmd('/home/ygb/ESMLB/Ryu-venv/bin/python3 iperf4.py {} &'.format(i))
+        print('run iperf client at 10.0.0.{} '.format(i))
+        print('ok')
 
 
-REMOTE_CONTROLLER_IP='0.0.0.0'
+def runScapy(net):
+    for i in range(1, 17):
+        host = net.get('h%d' % i)
+        host.cmd('sudo python3 -u scapyTraffic.py {} >scapy{}.log&'.format(i, i))
+        print('run scapy at 10.0.0.{} '.format(i))
+
+
+REMOTE_CONTROLLER_IP = '0.0.0.0'
 # REMOTE_CONTROLLER_IP='192.168.136.1'
 if __name__ == '__main__':
     setLogLevel('info')
-    topo=MyTopo()
-    net=Mininet(topo=topo,controller=None, link=TCLink, switch=OVSKernelSwitch)
+    topo = MyTopo()
+    net = Mininet(topo=topo, controller=None, link=TCLink, switch=OVSKernelSwitch)
     net.addController("c0",
                       controller=RemoteController,
                       ip=REMOTE_CONTROLLER_IP,
@@ -107,14 +117,17 @@ if __name__ == '__main__':
     print('net started')
     pingClient(net)
     net.pingAll()
-    initedConNum=0
+    initedConNum = 0
     while initedConNum != 4:
         f = open('/home/ygb/ESMLB/ryu/app/otherApp/initedController', 'r')
         lines = f.readlines()
         initedConNum = len(lines)
         f.close()
         time.sleep(1)
-    print('will runClient')
-    runClient(net)
+    # print('will runClient')
+    # runClient(net)
+
+    print('will runScapy')
+    runScapy(net)
     CLI(net)
     net.stop()

@@ -16,8 +16,8 @@
 
 from ryu.base import app_manager
 from ryu.lib import hub
-from ryu.app.wsgi import websocket, ControllerBase, WSGIApplication
-from ryu.app.wsgi import rpc_public, WebSocketRPCServer
+from ryu.app import websocket, ControllerBase, WSGIApplication
+from ryu.app import rpc_public, WebSocketRPCServer
 from ryu.services.protocols.bgp.api.base import call
 from ryu.services.protocols.bgp.api.base import PREFIX
 from ryu.services.protocols.bgp.rtconf.common import LOCAL_AS

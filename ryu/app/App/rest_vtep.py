@@ -246,10 +246,10 @@ supports only the OpenFlow version 1.3.
 import json
 
 from ryu.app.ofctl import api as ofctl_api
-from ryu.app.wsgi import ControllerBase
-from ryu.app.wsgi import Response
-from ryu.app.wsgi import route
-from ryu.app.wsgi import WSGIApplication
+from ryu.app.App.wsgi import ControllerBase
+from ryu.app.App.wsgi import Response
+from ryu.app.App.wsgi import route
+from ryu.app.App.wsgi import WSGIApplication
 from ryu.base import app_manager
 from ryu.exception import RyuException
 from ryu.lib.ovs import bridge as ovs_bridge

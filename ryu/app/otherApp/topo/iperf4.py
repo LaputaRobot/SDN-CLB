@@ -20,14 +20,14 @@ if __name__=='__main__':
             continue
         dstAdr='10.0.0.%d'%dst
         # bw=np.random.poisson(10)
-        bw=10/30
+        bw = 10 / 80
         if not firstSleep:
-            time.sleep(np.random.randint(1,8))
+            time.sleep(np.random.randint(1, 16))
             firstSleep=True
-        T=np.random.poisson(50)
+        T = np.random.poisson(100)
 
         result=os.system('iperf -u -c {} -b {}M -t {}'.format(dstAdr,bw,T))
         respondTimelogger.info('{}, iperf from 10.0.0.{} to {}, -b {}M -t {}, result : {}'.format(time.time(),local,dstAdr,bw,T,result))
-        sleepTime = np.random.poisson(50)
+        sleepTime = np.random.poisson(30)
         # print('sleep %ds'%sleepTime)
         time.sleep(sleepTime)

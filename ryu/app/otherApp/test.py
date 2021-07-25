@@ -1,91 +1,22 @@
-import collections
-import json
+#! /usr/bin/env python3
 import math
-import pickle
-import os
-import logging
-# paths={(1,2):[1,2]}
-# msg=json.dumps({'paths':str(paths)})
-# print(msg.__class__)
-# pathGet=eval(eval(msg)['paths'])
-# print(pathGet)
-# print(pathGet.__class__)
-# class A:
-#     def __init__(self):
-#         self.color='yellow'
-# a=A()
-# f = open('somefile', 'wb')
-# pickle.dump(a, f)
-# f=open('initedController','w')
-# f.write('ok')
-# f.close()
+import time
 
-# mycontroller=1
-# myport=str(mycontroller+6652)
-# result = os.popen('ps -ef|grep ryu-manager').readlines()
-# for r in result:
-#     print('result:',r)
-#     if myport in r:
-#         process=r.split()[1]
-#         print(process)
-# import random
-# import time
-#
-# logger=logging.getLogger('test_name')
-# logger.setLevel(level=logging.DEBUG)
-# handler=logging.FileHandler('respondTime.log',encoding='UTF-8')
-# logger.addHandler(handler)
-#
-# for i in range(1,10):
-#     time.sleep(1)
-#     controllerId=1
-#     r=random.Random()
-#     respondTime=r.uniform(1,100)
-#     start=time.time()
-#     logger.info("{},{},{}".format(time.time(),respondTime,controllerId))
-#     end=time.time()-start
-#     print('log: ',end)
-#
-#     start=time.time()
-#     file = open('respondTime.csv', 'w')
-#     fileData={12:'feawfe',23:'faweferfr'}
-#     file.seek(0)
-#     file.truncate()
-#     file.write(json.dumps(fileData))
-#     file.flush()
-#     end=time.time()-start
-#     print('file: ',end)
-# import TOPSIS
-# import pandas as pd
-# controllerId=3
-# datapathId=12
-# otherLoads={'1':192,'2':130,'4':200}
-# otherRAM=TOPSIS.getRAM(controllerId)
-# otherHop=TOPSIS.getOtherHop(str(datapathId),str(controllerId))
-# dataD = {'CPU': [v for v in otherLoads.values()], 'RAM': [v for v in otherRAM.values()],
-#          'hop': [v for v in otherHop.values()]}
-# index = [k for k in otherHop.keys()]
-# data = pd.DataFrame(dataD, index=index)
-# data['CPU'] = 1 / data['CPU']
-# data['RAM'] = 1 / data['RAM']
-# data['hop'] = 1 / data['hop']
-# dstController=int(TOPSIS.esmlb(data,TOPSIS.WEIGHT))
-# print(dstController)
+TableNum = {1: 27, 2: 20, 3: 28, 4: 21, 5: 29, 6: 45, 7: 44, 8: 42, 9: 22, 10: 35, 11: 33, 12: 29, 13: 28, 14: 27,
+            15: 21, 16: 10}
+switchF = [42, 36, 45, 33, 40, 84, 83, 67, 32, 62, 59, 60, 56, 44, 35, 30]
+print(sum(switchF) / 240 * 80 * 2)
+switchFG = {}
+sw = 1
+for i in switchF:
+    switchFG[sw] = (math.ceil(i / sum(switchF) * 538 / 5))
+    sw += 1
+print(switchFG)
+sum = 0
+with open('./topo/flowNum.log', 'r')as f:
+    lines = f.readlines()
+    for l in lines:
+        num = int(l.split(',')[-1])
+        sum += num
 
-# otherLoads={'2': 115.98035334312063, '3': 107.6521653221125, '4': 60.83879176444309}
-# myLoad=286
-# avgLoad = (myLoad + sum(otherLoads.values())) / 4
-# print(avgLoad)
-
-# print(sum(abs(v-avgLoad) for v in otherLoads.values()))
-# LBR=1-(abs(myLoad-avgLoad)+sum(abs(v-avgLoad) for v in otherLoads.values()))/(4*avgLoad)
-# print(LBR)
-# import time
-# for i in range(10):
-#     result=os.popen('ps -ef |grep iperf').readlines()
-#     print(time.time())
-#     for line in result:
-#         print(line)
-#     time.sleep(1)
-dct={1:"2"}
-print("{}".format(dct))
+print(sum / len(lines))

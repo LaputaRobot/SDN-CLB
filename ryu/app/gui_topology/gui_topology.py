@@ -30,7 +30,7 @@ import os
 
 from webob.static import DirectoryApp
 
-from ryu.app.wsgi import ControllerBase, WSGIApplication, route
+from ryu.app import ControllerBase, WSGIApplication, route
 from ryu.base import app_manager
 
 

@@ -15,13 +15,14 @@
 
 import json
 
-from ryu.app.wsgi import ControllerBase
-from ryu.app.wsgi import Response
-from ryu.app.wsgi import route
-from ryu.app.wsgi import WSGIApplication
+from ryu.app.App.wsgi import ControllerBase
+from ryu.app.App.wsgi import Response
+from ryu.app.App.wsgi import route
+from ryu.app.App.wsgi import WSGIApplication
 from ryu.base import app_manager
 from ryu.lib import dpid as dpid_lib
 from ryu.topology.api import get_switch, get_link, get_host
+
 
 # REST API for switch configuration
 #

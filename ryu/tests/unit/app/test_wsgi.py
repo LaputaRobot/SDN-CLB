@@ -21,10 +21,10 @@ import logging
 import nose
 from nose.tools import eq_
 
-from ryu.app.wsgi import ControllerBase
-from ryu.app.wsgi import WSGIApplication
-from ryu.app.wsgi import Response
-from ryu.app.wsgi import route
+from ryu.app import ControllerBase
+from ryu.app import WSGIApplication
+from ryu.app import Response
+from ryu.app import route
 from ryu.lib import dpid as dpidlib
 
 LOG = logging.getLogger('test_wsgi')

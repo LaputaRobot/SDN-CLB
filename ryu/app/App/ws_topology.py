@@ -38,7 +38,7 @@ from socket import error as SocketError
 from tinyrpc.exc import InvalidReplyError
 
 
-from ryu.app.wsgi import (
+from ryu.app.App.wsgi import (
     ControllerBase,
     WSGIApplication,
     websocket,

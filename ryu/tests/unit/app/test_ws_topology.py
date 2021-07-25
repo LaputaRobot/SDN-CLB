@@ -20,7 +20,7 @@ from socket import error as SocketError
 
 import mock
 
-from ryu.app.ws_topology import WebSocketTopology
+from ryu.app import WebSocketTopology
 
 
 class Test_ws_topology(unittest.TestCase):

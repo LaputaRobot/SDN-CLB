@@ -6,6 +6,7 @@ import csv
 import matplotlib.pyplot as plt
 import numpy as np
 
+
 con1=open('respondTime1.csv')
 con1CSV=csv.reader(con1,delimiter=',')
 
@@ -46,8 +47,9 @@ offset=0
 for i in range(1,con1Row):
     if len(con1List[i])==8:
         try:
-            con1X.append(float(con1List[i][0])-startTime-offset)
-            con1Y.append(float(con1List[i][modle]))
+            con1X.append(float(con1List[i][0]) - startTime - offset)
+            if float(con1List[i][modle]) > 0:
+                con1Y.append(float(con1List[i][modle]))
         except ValueError as e:
             print(e)
 con2XX=[]
@@ -110,16 +112,26 @@ ax = fig.add_subplot(111)
 
 # 添加X/Y轴描述
 ax.set_xlabel('time(s)')
-if modle==2:
+if modle == 2:
     ax.set_ylabel('Controller-Load(packet/s)')
-elif modle==3:
+elif modle == 3:
     ax.set_ylabel('LBR')
 
+CDFX = np.linspace(min(con1Y), max(con1Y), len(con1Y))
+CDFY = np.array(con1Y)
+count, bins_count = np.histogram(CDFY, bins=10)
+pdf = count / sum(count)
+cdf = np.cumsum(pdf)
+plt.plot(bins_count[1:], cdf)
 
+# ax.plot(CDFX,CDFY)
+# plt.show()
+# CDFY=CDFY/np.sum(con1Y)
+# plt(CDFX,CDFY)
 # plt.annotate('Start Migration', xy=(1052, 3767/3500), xytext=(1070, 3767/3500),arrowprops=dict(facecolor='black', shrink=0.05))
 # plt.annotate('End Migration', xy=(1057, 0.5), xytext=(1057, 0.75),arrowprops=dict(facecolor='black', shrink=0.05))
-ax.plot(con1X,con1Y,label='SMCS',linewidth=0.7)
-ax.plot(con2X,con2Y,label='ESMLB',linewidth=0.7)
+# ax.plot(con1X,con1Y,label='SMCS',linewidth=0.7)
+# ax.plot(con2X,con2Y,label='ESMLB',linewidth=0.7)
 # plt.axvline(6,linewidth=0.7,linestyle='--')
 # plt.axvline(83-36,linewidth=0.7,linestyle='--',c='r')
 # plt.axvline(42-36,linewidth=0.7,linestyle='dashdot',c='b')
@@ -131,9 +143,9 @@ ax.plot(con2X,con2Y,label='ESMLB',linewidth=0.7)
 # ax.plot(con4X,con4Y,label='controller4-SMCS',linewidth=0.7)
 # ax.plot(conLoadSumX,conLoadSum,label='controller-Sum-ESMLB',linewidth=0.7)
 # ax.set_xlim(endTime-startTime-200,endTime-startTime)
-ax.set_xlim(0,endTime-startTime)
+# ax.set_xlim(0,endTime-startTime)
 # ax.set_xlim(0,100)
-ax.set_ylim(0,1)
+# ax.set_ylim(0,1)
 # ax = plt.gca()
 # start, end = ax.get_xlim()
 # # 设置x轴刻度的显示步长

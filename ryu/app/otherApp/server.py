@@ -11,16 +11,20 @@ logging.basicConfig()
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
 
-f=open('initedController','w')
+f = open('migInter.csv', 'w')
 f.close()
-f=open("/home/ygb/ESMLB/ryu/app/otherApp/topo/iperf.log",'w')
+f = open('./topo/flowNum.log', 'w')
+f.write('{},{},{}\n'.format(time.time(), 0, 0))
+f = open('initedController', 'w')
 f.close()
-f=open('lock','w')
+f = open("/home/ygb/ESMLB/ryu/app/otherApp/topo/iperf.log", 'w')
+f.close()
+f = open('lock', 'w')
 f.write('False')
 f.close()
 
-for i in range(1,5):
-    f=open('respondTime{}.csv'.format(i),'w')
+for i in range(1, 5):
+	f = open('respondTime{}.csv'.format(i), 'w')
     f.close()
 
 class Server(object):
@@ -43,7 +47,7 @@ class Server(object):
 			client.start()
 
 	def start(self):
-		hub.spawn(self.monitor)
+		# hub.spawn(self.monitor)
 		print("Server start...")
 		self.server.serve_forever()
 		
@@ -89,37 +93,21 @@ class Client(object):
 			try:
 				message = self.socket.recv(128)
 				# print('try get message: ',message)
-				message=message.decode('utf-8')
+				message = message.decode('utf-8')
 				if len(message) == 0:
 					log.info("connection fail")
 					self.status = False
 					break
 				while '\n' != message[-1]:
 					message += self.socket.recv(128).decode('utf-8')
-					# print('message now is {}'.format(message))
-				# data = message.split("\n")
-				# print('message',message)
-				# print('receive at:',time.time(),message)
-				print('full message is message: {}'.format(message))
-				dstController=eval(message)['dstController']
-				print('dstController: ',dstController)
-				# print(message.__class__)
-				# message=json.dumps(message)
-				print('send msg {} to {}'.format(message,dstController))
-				self.server.clients[dstController].socket.sendall(message.encode('utf-8'))
-				# print('data',data)
-				# for temp in data:
-				# 	if len(temp) == 0:
-				# 		continue
-				# 	msg = json.loads(temp)#analyze message
-				# 	if msg['cmd'] == 'add_topo':
-				# 		dst_dpid = msg['dst_dpid']
-				# 		dst_port_no = msg['dst_port_no']
-				# 		src_dpid = msg['src_dpid']
-				# 		src_port_no = msg['src_port_no']
-				# 		if (src_dpid,dst_dpid) not in list(self.server.topo.keys()):
-				# 			self.server.topo[(src_dpid,dst_dpid)] = (src_port_no,dst_port_no)
-				# 			print("Add topo :",src_dpid,dst_dpid,":",src_port_no,dst_port_no)
+				# print('message now is {}'.format(message))
+				msg = message.split('\n')
+				for m in msg:
+					if m != '':
+						messageDict = eval(m)
+						dstController = messageDict['dstController']
+						print('send msg {} to {}'.format(message, dstController))
+						self.server.clients[dstController].socket.sendall(message.encode('utf-8'))
 				hub.sleep(0.1)
 			except ValueError:
 				print(('Value error for %s, len: %d', message, len(message)))

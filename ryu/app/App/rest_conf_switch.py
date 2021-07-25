@@ -25,8 +25,8 @@ import json
 
 from six.moves import http_client
 
-from ryu.app.wsgi import ControllerBase
-from ryu.app.wsgi import Response
+from ryu.app.App.wsgi import ControllerBase
+from ryu.app.App.wsgi import Response
 from ryu.base import app_manager
 from ryu.controller import conf_switch
 from ryu.lib import dpid as dpid_lib

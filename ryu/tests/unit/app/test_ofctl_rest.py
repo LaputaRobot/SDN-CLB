@@ -21,15 +21,16 @@ import logging
 import os
 import sys
 import unittest
+
 try:
     import mock  # Python 2
 except ImportError:
     from unittest import mock  # Python 3
 from nose.tools import eq_
 
-from ryu.app import ofctl_rest
-from ryu.app.wsgi import Request
-from ryu.app.wsgi import WSGIApplication
+from ryu.app.App import ofctl_rest
+from ryu.app import Request
+from ryu.app import WSGIApplication
 from ryu.controller.dpset import DPSet
 from ryu.ofproto import ofproto_protocol
 from ryu.ofproto import ofproto_v1_0
