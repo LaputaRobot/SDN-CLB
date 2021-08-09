@@ -21,40 +21,13 @@ class MyTopo(Topo):
             switches.append(s)
             self.addLink(h,s)
         linkopts=dict(bw=10)
-        self.addLink(switches[1],switches[2],**linkopts)
-        self.addLink(switches[2],switches[4],**linkopts)
-        self.addLink(switches[2],switches[3],**linkopts)
+        for i in range(1, 17):
+            for j in range(1, 3):
+                next = i + j
+                if next > 16:
+                    next -= 16
+                self.addLink(switches[i],switches[next],**linkopts)
 
-        self.addLink(switches[1],switches[7],**linkopts)
-        self.addLink(switches[4],switches[7],**linkopts)
-        self.addLink(switches[4],switches[5],**linkopts)
-        self.addLink(switches[3],switches[5],**linkopts)
-        self.addLink(switches[3],switches[6],**linkopts)
-
-        self.addLink(switches[5],switches[8],**linkopts)
-        self.addLink(switches[5],switches[6],**linkopts)
-        self.addLink(switches[6],switches[8],**linkopts)
-        self.addLink(switches[7],switches[8],**linkopts)
-
-        self.addLink(switches[7],switches[10],**linkopts)
-        self.addLink(switches[8],switches[11],**linkopts)
-        self.addLink(switches[8],switches[9],**linkopts)
-        self.addLink(switches[6],switches[9],**linkopts)
-        self.addLink(switches[6],switches[13],**linkopts)
-
-        self.addLink(switches[10],switches[11],**linkopts)
-        self.addLink(switches[11],switches[12],**linkopts)
-        self.addLink(switches[9],switches[12],**linkopts)
-
-        self.addLink(switches[10],switches[14],**linkopts)
-        self.addLink(switches[11],switches[14],**linkopts)
-
-        self.addLink(switches[12],switches[15],**linkopts)
-        self.addLink(switches[12],switches[16],**linkopts)
-        self.addLink(switches[12],switches[13],**linkopts)
-
-        self.addLink(switches[14],switches[15],**linkopts)
-        self.addLink(switches[13],switches[16],**linkopts)
 
 def pingClient(net):
     clients= {}
@@ -75,18 +48,28 @@ def runClient(net):
         host = clients['h%d' % i]
         host.cmd('iperf -s -u &')
         print("run iperf server at 10.0.0.{}".format(i))
-        if (math.ceil(i/4)==1 or math.ceil(i/4)==3):
-            host.cmd('/home/ygb/ESMLB/Ryu-venv/bin/python3 iperf4.py {} &'.format(i))
-            print('run iperf client at 10.0.0.{} '.format(i))
-            print('ok')
+        # if (math.ceil(i/4)==1 or math.ceil(i/4)==3):
+        #     host.cmd('/home/ygb/ESMLB/Ryu-venv/bin/python3 iperf4.py {} &'.format(i))
+        #     print('run iperf client at 10.0.0.{} '.format(i))
+        #     print('ok')
+        host.cmd('/home/ygb/ESMLB/Ryu-venv/bin/python3 iperf4.py {} &'.format(i))
+        print('run iperf client at 10.0.0.{} '.format(i))
+        print('ok')
 
 
-REMOTE_CONTROLLER_IP='0.0.0.0'
+def runScapy(net):
+    for i in range(1, 17):
+        host = net.get('h%d' % i)
+        host.cmd('sudo python3 -u scapyTraffic.py {} >scapy{}.log&'.format(i, i))
+        print('run scapy at 10.0.0.{} '.format(i))
+
+
+REMOTE_CONTROLLER_IP = '0.0.0.0'
 # REMOTE_CONTROLLER_IP='192.168.136.1'
 if __name__ == '__main__':
     setLogLevel('info')
-    topo=MyTopo()
-    net=Mininet(topo=topo,controller=None, link=TCLink, switch=OVSKernelSwitch)
+    topo = MyTopo()
+    net = Mininet(topo=topo, controller=None, link=TCLink, switch=OVSKernelSwitch)
     net.addController("c0",
                       controller=RemoteController,
                       ip=REMOTE_CONTROLLER_IP,
@@ -107,14 +90,17 @@ if __name__ == '__main__':
     print('net started')
     pingClient(net)
     net.pingAll()
-    initedConNum=0
+    initedConNum = 0
     while initedConNum != 4:
         f = open('/home/ygb/ESMLB/ryu/app/otherApp/initedController', 'r')
         lines = f.readlines()
         initedConNum = len(lines)
         f.close()
         time.sleep(1)
-    print('will runClient')
-    runClient(net)
+    # print('will runClient')
+    # runClient(net)
+
+    print('will runScapy')
+    runScapy(net)
     CLI(net)
     net.stop()

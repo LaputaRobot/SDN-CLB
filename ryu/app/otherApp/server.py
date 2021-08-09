@@ -3,7 +3,11 @@
 import logging
 import contextlib
 import json
+import os
+import threading
 import time
+import traceback
+
 from ryu.lib import hub
 from ryu.lib.hub import StreamServer
 
@@ -11,17 +15,30 @@ logging.basicConfig()
 log = logging.getLogger(__name__)
 log.setLevel(logging.INFO)
 
-f=open('initedController','w')
+ResultFolder= 'Result/'+time.strftime('%Y-%m-%d.%H_%M_%S')
+if not os.path.exists(ResultFolder):
+	os.makedirs(ResultFolder)
+
+f = open(ResultFolder+'/migInter.csv', 'w')
 f.close()
-f=open("/home/ygb/ESMLB/ryu/app/otherApp/topo/iperf.log",'w')
+f = open(ResultFolder+'/flowNum.log', 'w')
+f.write('{},{},{},{},{}\n'.format(time.time(), 0, 0,0,0))
 f.close()
-f=open('lock','w')
+f = open('initedController', 'w')
+f.close()
+# f = open("/home/ygb/ESMLB/ryu/app/otherApp/topo/iperf.log", 'w')
+# f.close()
+f = open('lock', 'w')
 f.write('False')
 f.close()
 
-for i in range(1,5):
-    f=open('respondTime{}.csv'.format(i),'w')
-    f.close()
+for i in range(1, 5):
+	f = open(ResultFolder+'/respondTime{}.csv'.format(i), 'w')
+	f.close()
+
+TableNum = {1: 6, 2: 5, 3: 6, 4: 5, 5: 6, 6: 12, 7: 12, 8: 9, 9: 5, 10: 9, 11: 8, 12: 8, 13: 8, 14: 6, 15: 5, 16: 4}
+for k in TableNum:
+    TableNum[k] =  7+2
 
 class Server(object):
 	def __init__(self, *args):
@@ -43,7 +60,7 @@ class Server(object):
 			client.start()
 
 	def start(self):
-		hub.spawn(self.monitor)
+		# hub.spawn(self.monitor)
 		print("Server start...")
 		self.server.serve_forever()
 		
@@ -60,12 +77,14 @@ class Client(object):
 		self.server = None  # connect to server
 		self.socket = socket
 		self.client_id = 0
+		self.startGetFT=False
 
 	def set_id(self,client_id):
 		self.client_id = client_id
 		msg = json.dumps({
 			'cmd': 'set_id',
-			'client_id': client_id
+			'client_id': client_id,
+			'resultFolder':ResultFolder
 		})
 		self.send(msg)
 
@@ -89,40 +108,32 @@ class Client(object):
 			try:
 				message = self.socket.recv(128)
 				# print('try get message: ',message)
-				message=message.decode('utf-8')
+				message = message.decode('utf-8')
 				if len(message) == 0:
 					log.info("connection fail")
 					self.status = False
 					break
 				while '\n' != message[-1]:
 					message += self.socket.recv(128).decode('utf-8')
-					# print('message now is {}'.format(message))
-				# data = message.split("\n")
-				# print('message',message)
-				# print('receive at:',time.time(),message)
-				print('full message is message: {}'.format(message))
-				dstController=eval(message)['dstController']
-				print('dstController: ',dstController)
-				# print(message.__class__)
-				# message=json.dumps(message)
-				print('send msg {} to {}'.format(message,dstController))
-				self.server.clients[dstController].socket.sendall(message.encode('utf-8'))
-				# print('data',data)
-				# for temp in data:
-				# 	if len(temp) == 0:
-				# 		continue
-				# 	msg = json.loads(temp)#analyze message
-				# 	if msg['cmd'] == 'add_topo':
-				# 		dst_dpid = msg['dst_dpid']
-				# 		dst_port_no = msg['dst_port_no']
-				# 		src_dpid = msg['src_dpid']
-				# 		src_port_no = msg['src_port_no']
-				# 		if (src_dpid,dst_dpid) not in list(self.server.topo.keys()):
-				# 			self.server.topo[(src_dpid,dst_dpid)] = (src_port_no,dst_port_no)
-				# 			print("Add topo :",src_dpid,dst_dpid,":",src_port_no,dst_port_no)
+				# print('message now is {}'.format(message))
+				msg = message.split('\n')
+				print('msg len is ',len(msg))
+				if self.client_id==1 and self.startGetFT==False:
+					getFTThread(1).start()
+					getFTThread(2).start()
+					self.startGetFT=True
+				for m in msg:
+					if m != '':
+						messageDict = eval(m)
+						dstController = messageDict['dstController']
+						print('send msg {} to {}'.format(m, dstController))
+						m+='\n'
+						self.server.clients[dstController].socket.sendall(m.encode('utf-8'))
 				hub.sleep(0.1)
 			except ValueError:
 				print(('Value error for %s, len: %d', message, len(message)))
+
+
 
 	def start(self):
 		# print('client start()...')
@@ -136,6 +147,75 @@ class Client(object):
 
 def main():
 	Server().start()
+
+
+class getFTThread(threading.Thread):
+	def __init__(self,name):
+		threading.Thread.__init__(self)
+		self.dpFlowTableNum = {}
+		self.name=name
+		if self.name=='1':
+			for i in range(1, 9):
+				self.dpFlowTableNum[i] = i
+		else:
+			for i in range(9, 17):
+				self.dpFlowTableNum[i] = i
+
+	def run(self):
+		while True:
+			try:
+				# start=time.time()
+				for dp_id in self.dpFlowTableNum.keys():
+					# print('get switch {} flow table number!!!'.format(dp_id))
+					tables = os.popen('sudo ovs-ofctl dump-flows s{}'.format(dp_id)).readlines()[1:]
+					# print('time1', time.time() - start)
+					minPacketRate = 100
+					minTpPort = 0
+					minInPort = "0"
+					minSrcIp = "0"
+					minDstIp = "0"
+					smallNum = 0  # 老鼠流表的数量
+					for table in tables:
+						# print(table)
+						details = table.split(',')
+						# print(details)
+						if len(details) > 9:
+							duration = details[1][10:-1]
+							n_packets = details[3][11:]
+							if float(duration) < 1:
+								# 只算稳定的流表
+								continue
+							packetRate = int(n_packets) / float(duration)
+							in_port = details[9][-1]
+							srcIP = details[10][7:]
+							dstIP = details[11][7:]
+							tp_port = details[12][7:]
+							# print('switch {}, in_port:{}, srcIP:{}, dstIP:{}, Rate:{}, duration:{}, tp_port:{}'.format(dp_id,in_port,srcIP,dstIP,packetRate,duration,tp_port))
+							if packetRate < 2:
+								smallNum += 1
+							if 0 < packetRate < minPacketRate:
+								minPacketRate = packetRate
+								minInPort = in_port
+								minSrcIp = srcIP
+								minDstIp = dstIP
+								minTpPort = tp_port
+					numDict = {"num": len(tables),
+							   "smallNum": smallNum,
+							   "zeroNum": TableNum[dp_id] - len(tables),  # 未使用的流表数量
+							   "minInPort": minInPort,
+							   "srcIP": minSrcIp,
+							   "dstIP": minDstIp,
+							   "minTpPort": minTpPort,
+							   "minPacketRate": minPacketRate}
+					# print('switch {}, flow table message {}'.format(dp_id, numDict))
+					with open('sw{}FT.json'.format(dp_id), 'w') as f:
+						f.write(numDict.__str__())
+					# print('get switch {} flow table num spend {} at {}'.format(dp_id, time.time() - start,time.time()))
+					# start = time.time()
+				time.sleep(0.1)
+			except Exception as e:
+				traceback.print_exc()
+				print(e)
 
 if __name__ == '__main__':
 	main()

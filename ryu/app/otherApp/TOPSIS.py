@@ -10,11 +10,15 @@ import numpy as np
 import os
 np.set_printoptions(suppress=True)
 
-HOP={'1':{'1':1,'2':2,'3':3,'4':4},'2':{'1':1,'2':2,'3':3,'4':4},'3':{'1':1,'2':2,'3':3,'4':4},'4':{'1':1,'2':2,'3':3,'4':4},
-     '5':{'1':2,'2':1,'3':2,'4':3},'6':{'1':2,'2':1,'3':2,'4':3},'7':{'1':2,'2':1,'3':2,'4':3},'8':{'1':2,'2':1,'3':2,'4':3},
-     '9':{'1':3,'2':2,'3':1,'4':2},'10':{'1':3,'2':2,'3':1,'4':2},'11':{'1':3,'2':2,'3':1,'4':2},'12':{'1':3,'2':2,'3':1,'4':2},
-     '13':{'1':4,'2':3,'3':2,'4':1},'14':{'1':4,'2':3,'3':2,'4':1},'15':{'1':4,'2':3,'3':2,'4':1},'16':{'1':4,'2':3,'3':2,'4':1}}
-WEIGHT=[0.6,0.2,0.2]
+HOP = {'1': {'1': 1, '2': 2, '3': 3, '4': 4}, '2': {'1': 1, '2': 2, '3': 3, '4': 4},
+       '3': {'1': 1, '2': 2, '3': 3, '4': 4}, '4': {'1': 1, '2': 2, '3': 3, '4': 4},
+       '5': {'1': 2, '2': 1, '3': 2, '4': 3}, '6': {'1': 2, '2': 1, '3': 2, '4': 3},
+       '7': {'1': 2, '2': 1, '3': 2, '4': 3}, '8': {'1': 2, '2': 1, '3': 2, '4': 3},
+       '9': {'1': 3, '2': 2, '3': 1, '4': 2}, '10': {'1': 3, '2': 2, '3': 1, '4': 2},
+       '11': {'1': 3, '2': 2, '3': 1, '4': 2}, '12': {'1': 3, '2': 2, '3': 1, '4': 2},
+       '13': {'1': 4, '2': 3, '3': 2, '4': 1}, '14': {'1': 4, '2': 3, '3': 2, '4': 1},
+       '15': {'1': 4, '2': 3, '3': 2, '4': 1}, '16': {'1': 4, '2': 3, '3': 2, '4': 1}}
+WEIGHT = [0.7, 0.2, 0.1]
 
 def getOtherHop(dpId,myControllerId):
     otherHop={}
@@ -23,19 +27,23 @@ def getOtherHop(dpId,myControllerId):
             otherHop[str(con)]=HOP[dpId][str(con)]
     return otherHop
 
+
 def getRAM(controllerId=1):
-    myport = str(controllerId + 6652)
-    result = os.popen('ps -ef|grep ryu-manager').readlines()
-    otherProcRAM= {}
-    for r in result:
-        if '--ofp-tcp-listen-port' in r and myport not in r:
-            controller = int(r.split('=')[-1][:4])-6652
-            process=r.split()[1]
-            # print('process',process)
-            numStr=os.popen('top -bc -p{} -n1|tail -1'.format(process)).readline().split()[9]
-            # print("****************************8888888"+numStr)
-            otherProcRAM[str(controller)]=float(numStr)
-    return otherProcRAM
+    try:
+        myport = str(controllerId + 6652)
+        result = os.popen('ps -ef|grep ryu-manager').readlines()
+        otherProcRAM = {}
+        for r in result:
+            if '--ofp-tcp-listen-port' in r and myport not in r:
+                controller = int(r.split('=')[-1][:4]) - 6652
+                process = r.split()[1]
+                # print('process',process)
+                numStr = os.popen('top -bc -p{} -n1|tail -1'.format(process)).readline().split()[9]
+                # print("****************************8888888"+numStr)
+                otherProcRAM[str(controller)] = float(numStr)
+        return otherProcRAM
+    except Exception as e:
+        print(e)
 
 
 
@@ -76,10 +84,10 @@ def esmlb(data, weight=None):
     # 归一化
     data = data / (data).sum()
     # data = data / np.sqrt((data ** 2).sum())
-    print('归一化：',data)
+    # print('归一化：',data)
     if weight is not None:
         data=data.dot(np.diag(weight))
-    print('加权矩阵：',data)
+    # print('加权矩阵：',data)
     Z = pd.DataFrame([data.min(), data.max()], index=['负理想解', '正理想解'])
     Result = data.copy()
     Result['正理想解'] = np.sqrt(((data - Z.loc['正理想解']) ** 2 ).sum(axis=1))

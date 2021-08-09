@@ -1,7 +1,8 @@
 import logging
+import traceback
 
 from ryu.base import app_manager
-from ryu.ofproto import ofproto_v1_3
+from ryu.ofproto import ofproto_v1_3, ofproto_v1_3_parser
 from ryu.controller import ofp_event
 from ryu.controller.handler import MAIN_DISPATCHER, CONFIG_DISPATCHER, HANDSHAKE_DISPATCHER
 from ryu.controller.handler import set_ev_cls
@@ -24,6 +25,12 @@ import TOPSIS
 import pandas as pd
 import lock
 
+# TableNum={1: 6, 2: 3, 3: 6, 4: 4, 5: 7, 6: 11, 7: 10, 8: 13, 9: 6, 10: 7, 11: 6, 12: 7, 13: 7, 14: 6, 15: 5, 16: 2}
+# TableNum={1: 28, 2: 24, 3: 30, 4: 22, 5: 27, 6: 56, 7: 56, 8: 45, 9: 22, 10: 42, 11: 40, 12: 40, 13: 38, 14: 30, 15: 24, 16: 20}
+TableNum = {1: 6, 2: 5, 3: 6, 4: 5, 5: 6, 6: 12, 7: 12, 8: 9, 9: 5, 10: 9, 11: 8, 12: 8, 13: 8, 14: 6, 15: 5, 16: 4}
+for k in TableNum:
+    TableNum[k] = TableNum[k] + 2
+
 
 #
 class PathForward(app_manager.RyuApp):
@@ -39,45 +46,43 @@ class PathForward(app_manager.RyuApp):
         self.topology_api_app = self
         #
         self.controllerId = 1
-        self.mac_to_port = {}
+
         self.datapaths = {}
         self.initRole = False
-        self.initedSWNum = 0
-        self.initedConNum = 0
+        self.initedSWNum = 0  # 分配交换机时，本控制器已经初始化的交换机数量
+        self.initedConNum = 0  # 已经初始化的控制器数量
         self.initCon = 0
-        # self.startTime = time.time()
+        self.startTime = time.time()
+        self.canMig = False
         # print('开始于：{}'.format(self.startTime))
 
+        # 控制器通信相关
         self.send_queue = hub.Queue(16)
         self.socket = socket.socket()
         self.start_serve('127.0.0.1', 8888)
         print('start_serve')
 
+        # 运行监控线程
         self.monitor_thread = hub.spawn(self._monitor)
-        self.get_Ram = hub.spawn(self._getRam)
-        self.lastMonitorTime = time.time()
-        self.packetInRate = 0
-        self.packetInCount = 0
-        self.lastPacketInCount = 0
 
+        self.lastMonitorTime = time.time()
+        self.localDatapathsRate = {}
+        self.myLoad = 0
+        self.myLoadWin = []
         self.respondTime = 0
 
-        self.localDatapaths = {}
-        self.localDatapathsRate = {}
         self.otherRAM = {}
+        # self.get_Ram = hub.spawn(self._getRam)
 
-        self.dpFlowTableNum = {} #交换机的流表数
-        self.eachFlowData={}
-        # {dpid:{ethe_address: port,...},...}
-        # 控制器通信相关
+        self.dpFlowTableNum = {}  # 交换机的流表数
 
         # barrier相关
         self.barrier_reply_Count = 0
         # 迁移过程变量
         self.startMigration = False  # 开始迁移的标志
-        self.deleteFlag = False  # 收到删除流表的标志
-        self.otherDel=False
-        self.srcSlave = False
+        self.deleteFlag = False  # 本地控制器收到删除流表的标志
+        self.otherDel = False  # 目标控制器删除流表的标志
+        self.dstMaster = False  # 目标控制器请求到Master成功的标志
 
         self.endMigration = False  # 结束迁移
         self.requestControllerID = 0  # 请求迁移的控制器
@@ -86,6 +91,9 @@ class PathForward(app_manager.RyuApp):
         self.toController = False
         self.cachePacketIn = queue.Queue()
 
+        # 迁移间隔
+        self.lastMigTime = time.time()
+
     def _monitor(self):
         """
         初始化，并监控交换机，超载则发送交换机迁移信息
@@ -93,41 +101,37 @@ class PathForward(app_manager.RyuApp):
         while True:
             # print("start monitor at {}".format(time.time()))
             if not self.initRole and self.sendPath and self.initCon == 0:
-                dp1 = self.datapaths[1]
-                ofp = dp1.ofproto
                 print('分配交换机')
                 for i in range(1, 17):
                     dpConNum = math.ceil(i / 4)
                     dp = self.datapaths[i]
                     if self.controllerId == dpConNum:
-                        self.send_role_request(dp, ofp.OFPCR_ROLE_MASTER)
-                        self.localDatapaths[i] = dp
+                        self.send_role_request(dp, ofproto_v1_3.OFPCR_ROLE_MASTER)
                         self.localDatapathsRate.setdefault(i, {})
-                        self.localDatapathsRate[i]['lastPacketInCount'] = 0
-                        self.localDatapathsRate[i]['packetInCount'] = 0
-                        self.localDatapathsRate[i]['packetInRate'] = 0
-                        self.localDatapathsRate[i]['packetInRateWind'] = []
-                        numDict = {'this num': 0,
-                                   'sum num': 0,
-                                   'times': 0,
-                                   'avg num': 0}
+                        numDict = {'num': 0,
+                                   'minInPort': 0,
+                                   'srcIP': 0,
+                                   'dstIP': 0,
+                                   'minTpPort': -1,
+                                   'minPacketRate': 100}
                         self.dpFlowTableNum[i] = numDict
                     else:
-                        self.send_role_request(dp, ofp.OFPCR_ROLE_SLAVE)
+                        self.send_role_request(dp, ofproto_v1_3.OFPCR_ROLE_SLAVE)
 
                 self.initCon = self.initCon + 1
                 myport = str(self.controllerId + 6652)
+                # 使用cpugroup对控制器的CPU处理能力进行限制
                 print('cgroup to limit controller cpu')
                 result = os.popen('ps -ef|grep ryu-manager').readlines()
                 for r in result:
-                    # print('result:', r)
                     if myport in r:
                         process = r.split()[1]
                         print(process)
                         os.system('echo {} |sudo tee /sys/fs/cgroup/cpu/controller{}/tasks'.format(process,
                                                                                                    self.controllerId))
 
-                self.get_Table_Num = hub.spawn(self._getTableNum)
+                self.get_Table_Num = hub.spawn(self._getTableNum)  # 监控交换机的流表信息
+                self.del_Flow_Data = hub.spawn(self._delFlowData)  # 删除未安装流表，且流速率为0的流的统计信息
 
             if self.initedConNum != 4:
                 f = open('initedController', 'r')
@@ -138,21 +142,24 @@ class PathForward(app_manager.RyuApp):
             if self.initRole and self.initedConNum == 4:
                 # print('进入监控 at {}'.format(time.time()))
                 for dpId in self.localDatapathsRate.keys():
-                    delta = self.localDatapathsRate[dpId]['packetInCount'] - self.localDatapathsRate[dpId][
-                        'lastPacketInCount']
-                    self.localDatapathsRate[dpId]['lastPacketInCount'] = self.localDatapathsRate[dpId]['packetInCount']
-                    thisRate = delta / (time.time() - self.lastMonitorTime)
+                    for flow in self.localDatapathsRate[dpId].keys():
+                        delta = self.localDatapathsRate[dpId][flow]['packetInCount'] - \
+                                self.localDatapathsRate[dpId][flow]['lastPacketInCount']
+                        self.localDatapathsRate[dpId][flow]['lastPacketInCount'] = self.localDatapathsRate[dpId][flow][
+                            'packetInCount']
+                        thisRate = delta / (time.time() - self.lastMonitorTime)
 
-                    if len(self.localDatapathsRate[dpId]['packetInRateWind']) >= 3:
-                        self.localDatapathsRate[dpId]['packetInRateWind'].pop(0)
-                        self.localDatapathsRate[dpId]['packetInRateWind'].append(thisRate)
-                    else:
-                        self.localDatapathsRate[dpId]['packetInRateWind'].append(thisRate)
-                    self.localDatapathsRate[dpId]['packetInRate'] = sum(
-                        self.localDatapathsRate[dpId]['packetInRateWind']) / len(
-                        self.localDatapathsRate[dpId]['packetInRateWind'])
-                    # self.localDatapathsRate[dpId]['packetInRate']=thisRate
-
+                        if len(self.localDatapathsRate[dpId][flow]['packetInRateWind']) >= 3:
+                            self.localDatapathsRate[dpId][flow]['packetInRateWind'].pop(0)
+                            self.localDatapathsRate[dpId][flow]['packetInRateWind'].append(thisRate)
+                        else:
+                            self.localDatapathsRate[dpId][flow]['packetInRateWind'].append(thisRate)
+                        packetInRate = sum(
+                            self.localDatapathsRate[dpId][flow]['packetInRateWind']) / len(
+                            self.localDatapathsRate[dpId][flow]['packetInRateWind'])
+                        self.localDatapathsRate[dpId][flow]['packetInRate'] = packetInRate
+                        # self.localDatapathsRate[dpId][flow]['packetInRate'] = thisRate
+                # print('结束各流负载计算at {}'.format(time.time()))
                 self.lastMonitorTime = time.time()
                 fileData = {self.controllerId: self.localDatapathsRate}
 
@@ -164,11 +171,35 @@ class PathForward(app_manager.RyuApp):
                     self.myFile.flush()
                     # print('完成写入：at {}'.format(time.time()))
 
-                myLoad = 0
+                thisMyLoad = 0
                 otherLoads = {}
+                details={}
                 for dpid in self.localDatapathsRate.keys():
-                    myLoad = myLoad + self.localDatapathsRate[dpid]['packetInRate']
+                    details[dpid] = {}
+                    bigNum = 0
+                    smallNum = 0
+                    for flow in self.localDatapathsRate[dpid].keys():
+                        flow_port = flow.split(',')[-2][1:]
+                        if flow_port in details[dpid]:
+                            flow_port += '--'
+                        details[dpid][flow_port] = self.localDatapathsRate[dpid][flow]['packetInRate']
+                        if self.localDatapathsRate[dpid][flow]['packetInRate'] != 0:
+                            if self.localDatapathsRate[dpid][flow]['packetInRate'] > 4:
+                                bigNum += 1
+                            else:
+                                smallNum += 1
+                        thisMyLoad = thisMyLoad + self.localDatapathsRate[dpid][flow]['packetInRate']
 
+                    details[dpid]['bigNum'] = bigNum
+                    details[dpid]['smallNum'] = smallNum
+                if len(self.myLoadWin) < 3:
+                    self.myLoadWin.append(thisMyLoad)
+                else:
+                    self.myLoadWin.pop(0)
+                    self.myLoadWin.append(thisMyLoad)
+
+                self.myLoad = sum(self.myLoadWin) / len(self.myLoadWin)
+                # self.myLoad=thisMyLoad
                 for other in self.files:
                     other.seek(0)
                     try:
@@ -180,60 +211,80 @@ class PathForward(app_manager.RyuApp):
                             # print('controller' + controller + '--------', end=' ')
                             otherController = controller
                             for switch in data[controller]:
-                                load = load + data[controller][switch]['packetInRate']
+                                for flow in data[controller][switch]:
+                                    load = load + data[controller][switch][flow]['packetInRate']
                                 # print('switch' + switch + ': ', data[controller][switch]['packetInRate'], end='   ')
                             otherControllerLoad = load
                         otherLoads[otherController] = otherControllerLoad
                     except json.JSONDecodeError as e:
                         print(e)
                         # print('')
-                avgLoad = (myLoad + sum(otherLoads.values())) / 4
+                avgLoad = (self.myLoad + sum(otherLoads.values())) / 4
                 LBR = 0
                 if avgLoad != 0:
-                    LBR = 1 - (abs(myLoad - avgLoad) + sum(abs(v - avgLoad) for v in otherLoads.values())) / (
-                                4 * avgLoad)
-                print('myLoad: ', myLoad)
-                print('detail:', self.localDatapathsRate)
+                    LBR = 1 - (abs(self.myLoad - avgLoad) + sum(abs(v - avgLoad) for v in otherLoads.values())) / (
+                            4 * avgLoad)
+                print('myLoad: ', self.myLoad)
+                print('detail:', details)
+                # print('detail:', self.localDatapathsRate)
                 print('otherLoads: ', otherLoads)
                 print('respondTime: ', self.respondTime)
                 print('LBR: ', LBR)
                 print('Table Num: ', self.dpFlowTableNum)
 
                 self.respondTimelogger.info(
-                    "{},{},{},{},{},{}".format(time.time(), self.respondTime, myLoad, LBR, self.controllerId,
-                                               otherLoads))
-                self.respondTime = 0
-                # if myLoad>avgLoad+100:
-                #     print('controller {} is overLoad!'.format(self.controllerId))
-                # print('离开监控：at {}'.format(time.time()))
+                    "{},{},{},{},{},{},{}".format(time.time(), self.respondTime, self.myLoad, LBR, self.controllerId,
+                                                  otherLoads, avgLoad * 4))
+                # dpIdList=list(self.dpFlowTableNum.keys())
+                # self.respondTimelogger.info('{},{},{},{},{},{},{},{}'.format(dpIdList[0],self.dpFlowTableNum[dpIdList[0]]['num'],
+                #                                                              dpIdList[1],self.dpFlowTableNum[dpIdList[1]]['num'],
+                #                                                              dpIdList[2],self.dpFlowTableNum[dpIdList[2]]['num'],
+                #                                                              dpIdList[3],self.dpFlowTableNum[dpIdList[3]]['num'],
+                #                                                              ))
+                self.respondTime = 0  # 重置响应时间
 
-                if myLoad > 130 and myLoad > avgLoad and not self.startMigration and len(
-                        otherLoads.keys()) == 3 and lock.get_lock(True):
+                if not self.canMig and time.time() - self.startTime > 40:
+                    self.canMig = True
+                    print('can migration')
+
+                allLoads=otherLoads
+                allLoads[self.controllerId]=self.myLoad
+                maxL = 0
+                maxC = 0
+                minL = 10000
+                minC = 0
+                for k, v in allLoads.items():
+                    if v < minL:
+                        minC = k
+                        minL = v
+                    if v > maxL:
+                        maxC = k
+                        maxL = v
+
+                Threshold=30
+                if maxL-minL>Threshold and self.controllerId==maxC and \
+                        not self.startMigration and len(otherLoads.keys()) == 3 and lock.get_lock(True):
 
                     # 发现超载，向目标控制器发送迁移请求
-
                     datapathId = 0
-                    rate = 10000
+                    minRate = 10000
                     for switch in self.localDatapathsRate.keys():
-                        if 15< self.localDatapathsRate[switch]['packetInRate'] < rate:
+                        dpRate = 0
+                        for flow in self.localDatapathsRate[switch].keys():
+                            dpRate += self.localDatapathsRate[switch][flow]['packetInRate']
+                        if 15 < dpRate < minRate:
                             datapathId = switch
-                            rate = self.localDatapathsRate[switch]['packetInRate']
-                    if datapathId==0:
-                        datapathId=self.localDatapathsRate.keys()[0]
-                    self.requestDatapaths.append(self.datapaths[datapathId])
-                    self.startMigration = True
-                    self.fromController = True
-                    self.requestControllerID = self.controllerId
-                    # self.requestDatapaths.append(self.datapaths[2])
-                    print('find overload at ', time.time())
-                    print('迁移交换机：S{}'.format(datapathId))
+                            minRate = dpRate
+
+                        # datapathId=self.localDatapathsRate.keys()[0]
+
                     # otherControllerId = []
                     # for i in range(1, 5):
                     #     if i != self.controllerId:
                     #         otherControllerId.append(i)
                     start = time.time()
                     otherHop = TOPSIS.getOtherHop(str(datapathId), str(self.controllerId))
-                    dataD = {'CPU': [v + 0.1 for v in otherLoads.values()], 'RAM': [v for v in self.otherRAM.values()],
+                    dataD = {'CPU': [v + 0.1 for v in otherLoads.values()], 'RAM': [1, 1, 1],
                              'hop': [v for v in otherHop.values()]}
                     index = [k for k in otherHop.keys()]
                     data = pd.DataFrame(dataD, index=index)
@@ -244,55 +295,107 @@ class PathForward(app_manager.RyuApp):
                     self.dstController = int(TOPSIS.esmlb(data, TOPSIS.WEIGHT))
                     # self.dstController = random.choice(otherControllerId)
 
+
+                    self.requestDatapaths.append(self.datapaths[datapathId])
+                    self.startMigration = True
+                    self.fromController = True
+                    self.requestControllerID = self.controllerId
+                    # self.requestDatapaths.append(self.datapaths[2])
+                    print('find overload at ', time.time())
+                    print('迁移交换机：S{}, Rate is {}, Table is {}'.format(datapathId, minRate,
+                                                                      self.dpFlowTableNum[datapathId]))
                     self.respondTimelogger.info(
-                        '{},migration switch{} from {} to {}, get controller spend time {}'.format(time.time(),
-                                                                                                   datapathId,
-                                                                                                   self.controllerId,
-                                                                                                   self.dstController,
-                                                                                                   time.time() - start))
+                        '{},migration switch{} Rate {} from {} to {}, get controller spend time {}'.format(time.time(),
+                                                                                                           datapathId,
+                                                                                                           minRate,
+                                                                                                           self.controllerId,
+                                                                                                           self.dstController,
+                                                                                                           time.time() - start))
+                    self.migInterLogger.info(
+                        '{},migration switch{},Rate {}, from {}, to {},{},{}'.format(time.time(), datapathId, minRate,
+                                                                                     self.controllerId,
+                                                                                     self.dstController,
+                                                                                     self.lastMigTime,
+                                                                                     time.time() - self.lastMigTime))
+                    self.lastMigTime = time.time()
+
                     message = json.dumps({'srcController': self.controllerId,
                                           'dstController': self.dstController, 'startMigration': 'True',
                                           'datapath': datapathId
                                           })
                     self.send(message)
 
-            hub.sleep(0.5)
+            hub.sleep(1)
+
+    def _delFlowData(self):
+        # 删除过期的流表数据
+        while True:
+            try:
+                for dpID in self.localDatapathsRate:
+                    popKey = []
+                    for flow in self.localDatapathsRate[dpID]:
+                        if len(self.localDatapathsRate[dpID][flow]['packetInRateWind']) >= 1:
+                            packetInRate = sum(
+                                self.localDatapathsRate[dpID][flow]['packetInRateWind']) / len(
+                                self.localDatapathsRate[dpID][flow]['packetInRateWind'])
+                            if packetInRate == 0:
+                                print('del flow data: ', flow)
+                                popKey.append(flow)
+
+                    for k in popKey:
+                        self.localDatapathsRate[dpID].pop(k)
+
+                time.sleep(5)
+            except Exception as e:
+                traceback.print_exc()
+                print(e)
 
     def _getTableNum(self):
         while True:
             try:
-                if self.startMigration!=True:
-                    # print('get flow table number!!!')
+                if self.startMigration != True:
                     for dp_id in self.dpFlowTableNum.keys():
-                        print('get switch {} table num '.format(dp_id))
-                        num = int(os.popen('sudo ovs-ofctl dump-flows s{} |wc -l'.format(dp_id)).readline().split()[0])
-                        print('result is ',num)
-                        sumNum = self.dpFlowTableNum[dp_id]['sum num'] + num
-                        times = self.dpFlowTableNum[dp_id]['times'] + 1
-                        avgNum = sumNum / times
-                        numDict = {'this num': num,
-                                   'sum num': sumNum,
-                                   'times': times,
-                                   'avg num': avgNum}
+                        # print('get switch {} flow table number!!!'.format(dp_id))
+                        tables = os.popen('sudo ovs-ofctl dump-flows s{}'.format(dp_id)).readlines()[1:]
+                        minPacketRate = 100
+                        minTpPort = -1
+                        minInPort = '0'
+                        minSrcIp = '0'
+                        minDstIp = '0'
+                        for table in tables:
+                            # print(table)
+                            details = table.split(',')
+                            # print(details)
+                            if len(details) > 9:
+                                duration = details[1][10:-1]
+                                n_packets = details[3][11:]
+                                if float(duration) < 2:
+                                    # 只算稳定的流表
+                                    continue
+                                packetRate = int(n_packets) / float(duration)
+                                in_port = details[9][-1]
+                                srcIP = details[10][7:]
+                                dstIP = details[11][7:]
+                                tp_port = details[12][7:]
+                                # print('switch {}, in_port:{}, srcIP:{}, dstIP:{}, Rate:{}, duration:{}, tp_port:{}'.format(dp_id,in_port,srcIP,dstIP,packetRate,duration,tp_port))
+                                if 0 < packetRate < minPacketRate:
+                                    minPacketRate = packetRate
+                                    minInPort = in_port
+                                    minSrcIp = srcIP
+                                    minDstIp = dstIP
+                                    minTpPort = tp_port
+                        numDict = {'num': len(tables),
+                                   'minInPort': minInPort,
+                                   'srcIP': minSrcIp,
+                                   'dstIP': minDstIp,
+                                   'minTpPort': minTpPort,
+                                   'minPacketRate': minPacketRate}
+                        print('switch {}, flow table message {}'.format(dp_id, numDict))
                         self.dpFlowTableNum[dp_id] = numDict
                 time.sleep(0.5)
             except Exception as e:
+                traceback.print_exc()
                 print(e)
-
-    def getTableNum(self,dp_id):
-        start=time.time()
-        print('get switch {} table num at {}'.format(dp_id,start))
-        num = int(os.popen('sudo ovs-ofctl dump-flows s{} |wc -l'.format(dp_id)).readline().split()[0])
-        print('spend time ',time.time()-start)
-        print('result is ', num)
-        sumNum = self.dpFlowTableNum[dp_id]['sum num'] + num
-        times = self.dpFlowTableNum[dp_id]['times'] + 1
-        avgNum = sumNum / times
-        numDict = {'this num': num,
-                   'sum num': sumNum,
-                   'times': times,
-                   'avg num': avgNum}
-        self.dpFlowTableNum[dp_id] = numDict
 
     def _getRam(self):
         while True:
@@ -335,30 +438,11 @@ class PathForward(app_manager.RyuApp):
             while self.status:
                 message = self.send_queue.get()
                 message += '\n'
-                print('send message at: ', time.time())
-                print(message)
+                print('send message {} at: {}'.format(message, time.time()))
+                # print(message)
                 self.socket.sendall(message.encode('utf-8'))
         finally:
             self.send_queue = None
-
-    def rece_slave(self):
-        try:
-            message = self.socket.recv(128)
-            message = message.decode('utf-8')
-            # print('receive msg1:',message)
-            if len(message) == 0:  # 关闭连接
-                self.logger.info('connection fail, close')
-            while '\n' != message[-1]:
-                message += self.socket.recv(128).decode('utf-8')
-            print('receive msg:', message)
-            messageDict = eval(message)
-
-            if 'slave' in messageDict.keys():
-                if messageDict['slave'] == 'True':
-                    self.srcSlave = True
-
-        except ValueError:
-            print(('Value error for %s, len: %d', message, len(message)))
 
     def _rece_loop(self):
         """
@@ -376,109 +460,122 @@ class PathForward(app_manager.RyuApp):
                 while '\n' != message[-1]:
                     message += self.socket.recv(128).decode('utf-8')
                 print('receive msg:', message)
-                messageDict = eval(message)
-                # print('receive msg at:',time.time())
+                msg = message.split('\n')
+                for m in msg:
+                    if m != '':
+                        messageDict = eval(m)
+                        # print('receive msg at:',time.time())
 
-                if 'sendPath' in messageDict.keys():
-                    print('get paths ...............')
-                    self.paths = eval(messageDict['paths'])
-                    f = open('netGraph', 'rb')
-                    self.G = pickle.load(f)
-                    self.hasPaths = True
-                    self.sendPath = True
-
-                if 'startMigration' in messageDict.keys():
-                    print('receive migration request at:', time.time())
-                    print('receive msg {} from {}:'.format(message, messageDict['srcController']))
-                    if messageDict['startMigration'] == 'True' and not self.startMigration:
-                        # 收到迁移请求，请求角色到EQUAL
-                        self.startMigration = True  # 目标控制器的开始迁移标志变为TRUE，防止同时出现多个控制器迁移到相同的控制器，而发生冲突
-                        self.toController = True
-                        # self.file.write('{},{}'.format(time.time(), '请求到EQUAL'))
-                        # self.file.flush()
-                        self.requestControllerID = messageDict['srcController']
-                        print('request to equal')
-                        # TO DO：
-                        # 将交换机换成列表的形式
-                        dp = self.datapaths[messageDict['datapath']]
-                        self.requestDatapaths.append(dp)
-                        self.respondTimelogger.info(
-                            '{},dst controller receive mig request at switch {} from controller {}'.format(time.time(),
-                                                                                                           messageDict[
-                                                                                                               'datapath'],
-                                                                                                           self.requestControllerID))
-                        # ofp_parse=dp.ofproto_parser
-                        ofp = dp.ofproto
-                        self.send_role_request(dp, ofp.OFPCR_ROLE_EQUAL)
-
-                if 'ready' in messageDict.keys():  #
-                    if messageDict['ready'] == 'True':
-                        # 安装空流表，发送barrier消息
-                        dp = self.datapaths[messageDict['datapath']]
-                        ofp_parse = dp.ofproto_parser
-                        ofp = dp.ofproto
-                        # self.send_role_request(dp, ofp.OFPCR_ROLE_EQUAL)
-                        out_port = 1234
-                        in_port = 1234
-                        actions = [ofp_parse.OFPActionOutput(out_port)]
-                        match = ofp_parse.OFPMatch(in_port=in_port)
-                        flags = ofp.OFPFF_SEND_FLOW_REM
-                        self.add_flow1(dp, 1, match, actions, idle_timeout=0, flags=flags)
-                        self.barrier_reply_Count = 0
-                        self.send_barrier_request(dp)
-                        print('安装空流表，发送barrier消息 at {}'.format(time.time()))
-
-                if 'delFlowTable' in messageDict.keys():
-                    if messageDict['delFlowTable']=='True':
-                        self.otherDel=True
-
-
-
-                if 'cmd' in messageDict.keys():
-                    if messageDict['cmd'] == 'set_id':
-                        self.controllerId = messageDict['client_id']
-                        print('get controller id {}'.format(self.controllerId))
-                        if self.controllerId == 1:
+                        if 'sendPath' in messageDict.keys():
+                            print('get paths ...............')
+                            self.paths = eval(messageDict['paths'])
+                            f = open('netGraph', 'rb')
+                            self.G = pickle.load(f)
                             self.hasPaths = True
-                        self.openFile()
-                        self.respondTimelogger = logging.getLogger('respondTime')
-                        self.respondTimelogger.setLevel(level=logging.DEBUG)
-                        self.respondTimehandler = logging.FileHandler('respondTime{}.csv'.format(self.controllerId),
-                                                                      encoding='UTF-8')
-                        self.respondTimelogger.addHandler(self.respondTimehandler)
+                            self.sendPath = True
 
-                if 'endMigration' in messageDict.keys():
-                    if messageDict['endMigration'] == 'True':
-                        self.endMigration = True
-                        # self.file.write('{},{}'.format(time.time(), '结束迁移'))
-                        # self.file.flush()
-                        print('收到结束迁移于：', time.time())
-                        dpid = messageDict['datapath']
-                        dp = self.datapaths[dpid]
-                        ofp = dp.ofproto
-                        self.send_role_request(dp, ofp.OFPCR_ROLE_MASTER)
-                        print('请求到MASTER')
-                        print('迁移后获取各交换机流表')
-                        self.getTableNum(dpid)
+                        if 'startMigration' in messageDict.keys():
+                            print('receive migration request at:', time.time())
+                            print('receive msg {} from {}:'.format(message, messageDict['srcController']))
+                            if messageDict['startMigration'] == 'True' and not self.startMigration:
+                                # 收到迁移请求，请求角色到EQUAL
+                                self.startMigration = True  # 目标控制器的开始迁移标志变为TRUE，防止同时出现多个控制器迁移到相同的控制器，而发生冲突
+                                self.toController = True
+                                # self.file.write('{},{}'.format(time.time(), '请求到EQUAL'))
+                                # self.file.flush()
+                                self.requestControllerID = messageDict['srcController']
+                                print('request to equal')
+                                # TO DO：
+                                # 将交换机换成列表的形式
+                                dp = self.datapaths[messageDict['datapath']]
+                                self.requestDatapaths.append(dp)
+                                self.respondTimelogger.info(
+                                    '{},dst controller receive mig request at switch {} from controller {}'.format(
+                                        time.time(),
+                                        messageDict[
+                                            'datapath'],
+                                        self.requestControllerID))
+                                # ofp_parse=dp.ofproto_parser
+                                ofp = dp.ofproto
+                                self.send_role_request(dp, ofp.OFPCR_ROLE_EQUAL)
 
-                        self.fromController = False
-                        self.toController = False
-                        print('处理缓存的消息')
-                        while not self.cachePacketIn.empty():
-                            ev = self.cachePacketIn.get()
-                            self.cache_packet_in_handler(ev)
-                        while self.srcSlave==False:
-                            self.rece_slave()
-                        print('处理完成，结束迁移')
-                        lock.write_lock()
-                        self.respondTimelogger.info('{},end migration'.format(time.time()))
-                        # self.requestDatapaths.remove(dp)
-                        self.startMigration = False  # 开始迁移的标志
-                        self.deleteFlag = False  # 收到删除流表的标志
-                        self.endMigration = False  # 结束迁移
-                        self.requestControllerID = 0  # 请求迁移的控制器
-                        self.requestDatapaths = []
-                        self.srcSlave=False
+                        if 'ready' in messageDict.keys():  #
+                            if messageDict['ready'] == 'True':
+                                # 安装空流表，发送barrier消息
+                                dp = self.datapaths[messageDict['datapath']]
+                                ofp_parse = dp.ofproto_parser
+                                ofp = dp.ofproto
+                                # self.send_role_request(dp, ofp.OFPCR_ROLE_EQUAL)
+                                out_port = 1234
+                                in_port = 1234
+                                actions = [ofp_parse.OFPActionOutput(out_port)]
+                                match = ofp_parse.OFPMatch(in_port=in_port)
+                                flags = ofp.OFPFF_SEND_FLOW_REM
+                                self.add_flow1(dp, 1, match, actions, idle_timeout=0, flags=flags)
+                                self.barrier_reply_Count = 0
+                                self.send_barrier_request(dp)
+                                print('安装空流表，发送barrier消息 at {}'.format(time.time()))
+
+                        if 'delFlowTable' in messageDict.keys():
+                            if messageDict['delFlowTable'] == 'True':
+                                self.otherDel = True
+
+                        if 'sendFlowData' in messageDict.keys():
+                            self.localDatapathsRate[self.requestDatapaths[0].id] = messageDict['FlowData']
+
+                        if 'cmd' in messageDict.keys():
+                            if messageDict['cmd'] == 'set_id':
+                                self.controllerId = messageDict['client_id']
+                                print('get controller id {}'.format(self.controllerId))
+                                if self.controllerId == 1:
+                                    self.hasPaths = True
+                                self.openFile()
+                                self.respondTimelogger = logging.getLogger('respondTime')
+                                self.respondTimelogger.setLevel(level=logging.DEBUG)
+                                self.respondTimehandler = logging.FileHandler(
+                                    'respondTime{}.csv'.format(self.controllerId),
+                                    encoding='UTF-8')
+                                self.respondTimelogger.addHandler(self.respondTimehandler)
+
+                                self.migInterLogger = logging.getLogger('migInter')
+                                self.migInterLogger.setLevel(level=logging.DEBUG)
+                                self.migInterHandler = logging.FileHandler('migInter.csv', encoding='UTF-8')
+                                self.migInterLogger.addHandler(self.migInterHandler)
+
+                        if 'endMigration' in messageDict.keys():
+                            if messageDict['endMigration'] == 'True':
+                                self.endMigration = True
+                                # self.file.write('{},{}'.format(time.time(), '结束迁移'))
+                                # self.file.flush()
+                                print('收到结束迁移于：', time.time())
+                                dpid = messageDict['datapath']
+                                dp = self.datapaths[dpid]
+                                ofp = dp.ofproto
+                                print('请求到MASTER')
+                                self.send_role_request(dp, ofp.OFPCR_ROLE_MASTER)
+                                # print('迁移后获取各交换机流表')
+                                # self.getTableNum(dpid)
+                                print('处理缓存的消息')
+                                while not self.cachePacketIn.empty():
+                                    ev = self.cachePacketIn.get()
+                                    self.cache_packet_in_handler(ev)
+                                print('处理完成，结束迁移')
+
+                        if 'slave' in messageDict.keys():
+                            if messageDict['slave'] == 'True':
+                                while self.dstMaster != True:
+                                    time.sleep(0.001)
+                                print('receive slave msg from source controller')
+                                lock.write_lock()
+                                self.respondTimelogger.info('{},end migration'.format(time.time()))
+                                # self.requestDatapaths.remove(dp)
+                                self.fromController = False
+                                self.toController = False
+                                self.startMigration = False  # 开始迁移的标志
+                                self.deleteFlag = False  # 收到删除流表的标志
+                                self.endMigration = False  # 结束迁移
+                                self.requestControllerID = 0  # 请求迁移的控制器
+                                self.requestDatapaths = []
 
             except ValueError:
                 print(('Value error for %s, len: %d', message, len(message)))
@@ -529,31 +626,35 @@ class PathForward(app_manager.RyuApp):
             if self.startMigration == True:
                 if self.toController == True:
                     self.deleteFlag = True
-                    self.localDatapaths[dp.id] = dp
+                    # self.localDatapaths[dp.id] = dp
                     self.localDatapathsRate.setdefault(dp.id, {})
-                    self.localDatapathsRate[dp.id]['lastPacketInCount'] = 0
-                    self.localDatapathsRate[dp.id]['packetInCount'] = 0
-                    self.localDatapathsRate[dp.id]['packetInRate'] = 0
-                    self.localDatapathsRate[dp.id]['packetInRateWind'] = []
-                    numDict = {'this num': 0,
-                               'sum num': 0,
-                               'times': 0,
-                               'avg num': 0}
+                    # self.localDatapathsRate[dp.id]['lastPacketInCount'] = 0
+                    # self.localDatapathsRate[dp.id]['packetInCount'] = 0
+                    # self.localDatapathsRate[dp.id]['packetInRate'] = 0
+                    # self.localDatapathsRate[dp.id]['packetInRateWind'] = []
+                    numDict = {'num': 100,
+                               'minInPort': 0,
+                               'srcIP': 0,
+                               'dstIP': 0,
+                               'minTpPort': -1,
+                               'minPacketRate': 100}
                     self.dpFlowTableNum[dp.id] = numDict
-                    delMsg=json.dumps({'dstController': self.requestControllerID,
-                                'srcController': self.controllerId,
-                                'delFlowTable': 'True', "datapath": dp.id})
+                    delMsg = json.dumps({'srcController': self.controllerId,
+                                         'dstController': self.requestControllerID,
+                                         'delFlowTable': 'True', "datapath": dp.id})
                     self.send(delMsg)
 
                 if self.fromController == True:
-                # self.file.write('{},{}\n'.format(time.time(), '已删除空流表'))
-                # self.file.flush()
-                    while  self.otherDel!=True:
+                    # self.file.write('{},{}\n'.format(time.time(), '已删除空流表'))
+                    # self.file.flush()
+                    while self.otherDel != True:
                         time.sleep(0.05)
                     self.deleteFlag = True
-                    self.localDatapathsRate.pop(dp.id)
-                    self.dpFlowTableNum.pop(dp.id)
-                    print('本控制器流表删除状态：{}, 其他控制器删除状态：{}'.format(self.deleteFlag,self.otherDel))
+                    message = json.dumps({'srcController': self.controllerId,
+                                          'dstController': self.dstController,
+                                          'sendFlowData': 'True', "FlowData": self.localDatapathsRate[dp.id]})
+                    self.send(message)
+                    print('本控制器流表删除状态：{}, 其他控制器删除状态：{}'.format(self.deleteFlag, self.otherDel))
                     print('流表已删除，进入backout......at ', time.time())
                     self.send_barrier_request(dp)
                 # time.sleep(5.310)
@@ -589,13 +690,20 @@ class PathForward(app_manager.RyuApp):
                 [HANDSHAKE_DISPATCHER, CONFIG_DISPATCHER, MAIN_DISPATCHER])
     def error_msg_handler(self, ev):
         msg = ev.msg
-        dp=msg.datapath
-        if dp in self.requestDatapaths and \
-            msg.type==ofproto_v1_3.OFPET_ROLE_REQUEST_FAILED and \
-            msg.code==ofproto_v1_3.OFPRRFC_STALE:
+        dp = msg.datapath
+        if dp in self.requestDatapaths and self.fromController == True and \
+                msg.type == ofproto_v1_3.OFPET_ROLE_REQUEST_FAILED and \
+                msg.code == ofproto_v1_3.OFPRRFC_STALE:
             self.send_role_request(dp, ofproto_v1_3.OFPCR_ROLE_SLAVE)
-        self.logger.info('OFPErrorMsg received: type=0x%02x code=0x%02x ',
-                      msg.type, msg.code)
+            print('重新请求至SLAVE')
+        if dp in self.requestDatapaths and self.toController == True and \
+                msg.type == ofproto_v1_3.OFPET_ROLE_REQUEST_FAILED and \
+                msg.code == ofproto_v1_3.OFPRRFC_STALE:
+            self.send_role_request(dp, ofproto_v1_3.OFPCR_ROLE_MASTER)
+            print('重新请求至MASTER')
+
+        self.logger.debug('OFPErrorMsg received: type=0x%02x code=0x%02x ',
+                          msg.type, msg.code)
 
     @set_ev_cls(ofp_event.EventOFPRoleReply, MAIN_DISPATCHER)
     def role_reply_handler(self, ev):
@@ -609,8 +717,8 @@ class PathForward(app_manager.RyuApp):
             role = 'EQUAL'
             if dp in self.requestDatapaths:
                 # dstController=self.requestControllerID
-                readyMessage = json.dumps({'dstController': self.requestControllerID,
-                                           'srcController': self.controllerId,
+                readyMessage = json.dumps({'srcController': self.controllerId,
+                                           'dstController': self.requestControllerID,
                                            'ready': 'True', "datapath": dpid})
                 self.send(readyMessage)
                 print('请求到EQUAL')
@@ -624,6 +732,11 @@ class PathForward(app_manager.RyuApp):
                     f.write(str(self.controllerId) + '\n')
                     f.close()
                     self.initRole = True
+
+            if self.toController == True and dp in self.requestDatapaths:
+                self.dstMaster = True
+
+
         elif msg.role == ofp.OFPCR_ROLE_SLAVE:
             role = 'SLAVE'
             if not self.initRole:
@@ -636,10 +749,13 @@ class PathForward(app_manager.RyuApp):
                     self.initRole = True
 
             if self.fromController == True and dp in self.requestDatapaths:
-                slaveMessage = json.dumps({'dstController': self.dstController,
-                                           'srcController': self.controllerId,
+                slaveMessage = json.dumps({'srcController': self.controllerId,
+                                           'dstController': self.dstController,
                                            'slave': 'True', "datapath": dpid})
                 self.send(slaveMessage)
+                print('del mig switch local message!!!')
+                self.localDatapathsRate.pop(dp.id)
+                self.dpFlowTableNum.pop(dp.id)
                 self.startMigration = False  # 开始迁移的标志
                 self.deleteFlag = False  # 收到删除流表的标志
                 self.otherDel = False
@@ -682,8 +798,8 @@ class PathForward(app_manager.RyuApp):
             # self.file.write('{},{}\n'.format(time.time(), '结束迁移'))
             # self.file.flush()
             # self.localDatapathsRate.pop(dp.id)
-            endMigrationMsg = json.dumps({'dstController': self.dstController,
-                                          'srcController': self.controllerId,
+            endMigrationMsg = json.dumps({'srcController': self.controllerId,
+                                          'dstController': self.dstController,
                                           'endMigration': 'True',
                                           'datapath': dp.id})
             self.send(endMigrationMsg)
@@ -767,7 +883,7 @@ class PathForward(app_manager.RyuApp):
                                               'paths': str(self.paths)
                                               })
                         self.send(message)
-                        time.sleep(3)
+                        time.sleep(1)
                 self.sendPath = True
 
             next_hop = path[path.index(dpid) + 1]
@@ -813,15 +929,12 @@ class PathForward(app_manager.RyuApp):
             if self.barrier_reply_Count == 1 and self.startMigration == True :
                 print('忽略消息 from switch {} at controller {}'.format(datapath.id, self.controllerId))
                 return
-            # if self.barrier_reply_Count == 2 and self.startMigration == True :
-            #     print('请求为SLAVE from switch {} at controller {}'.format(datapath.id, self.controllerId))
-            #     self.send_role_request(datapath, ofp.OFPCR_ROLE_SLAVE)
-            #     return
-            # 目标控制器
+
         if not self.deleteFlag and self.toController == True and datapath in self.requestDatapaths:  # 如果是目标控制器，在收到删除流表消息前，忽略消息Packet_IN消息
             # print(self.packetInCount)
             print('忽略消息 from switch {} at controller {}'.format(datapath.id, self.controllerId))
             return
+
         if self.deleteFlag and \
                 self.toController == True and \
                 datapath in self.requestDatapaths and \
@@ -853,17 +966,9 @@ class PathForward(app_manager.RyuApp):
         if isinstance(ip_pkt, ipv4.ipv4):
             dst = ip_pkt.dst
             src = ip_pkt.src
-        if isinstance(tcp_pkt, tcp.tcp):
-            tcp_srcp = tcp_pkt.src_port
-            tcp_dstp = tcp_pkt.dst_port
 
-        flow=(src,dst,tcp_srcp,tcp_dstp)
-        if datapath.id in self.localDatapathsRate.keys():
-            self.localDatapathsRate[datapath.id]['packetInCount'] = self.localDatapathsRate[datapath.id][
-                                                                        'packetInCount'] + 1
-
-        # print('{}, packet in form {} to {} at {}'.format(self.packetInTime,src,dst,dpid))
         out_port = self.get_out_port(datapath, src, dst, in_port)
+        # out_port = ofproto_v1_3.OFPP_IN_PORT
         if out_port == ofp.OFPP_FLOOD:
             # print('add host .................')
             return
@@ -873,32 +978,72 @@ class PathForward(app_manager.RyuApp):
         # time.sleep(hopDelay)
 
         actions = [ofp_parser.OFPActionOutput(out_port, ofp.OFPCML_NO_BUFFER)]
-        # if self.startMigration==False:
-        #     out_port = 1234
-        #     in_port = 1234
-        #     actions = [ofp_parser.OFPActionOutput(out_port,ofp.OFPCML_NO_BUFFER)]
-        #     match = ofp_parser.OFPMatch(in_port=in_port)
-        #     flags = ofp.OFPFF_SEND_FLOW_REM
-        #     self.add_flow1(datapath, 1, match, actions, flags=flags)
-        #     self.startMigration=True
-        # 如果执行的动作不是flood，那么此时应该依据流表项进行转发操作，所以需要添加流表到交换机
-        # if out_port != ofp.OFPP_FLOOD and isinstance(ip_pkt,ipv4.ipv4):
-        #     # print('add flow at switch {}'.format(datapath.id))
-        #     # print('match : in_port={}, ipv4_dst={}, ipv4_src={}'.format(in_port, dst, src))
-        #     match = ofp_parser.OFPMatch(in_port=in_port,eth_type=ether_types.ETH_TYPE_IP, ipv4_src=src, ipv4_dst=dst)
-        #     self.add_flow1(datapath=datapath, priority=1, match=match, idle_timeout=5,actions=actions,flags=0)
 
-        if self.initRole and \
-                20 > self.dpFlowTableNum[dpid]['this num'] > 0 and \
-                out_port != ofp.OFPP_FLOOD and isinstance(tcp_pkt, tcp.tcp):
-            self.dpFlowTableNum[dpid]['this num']+=1
-            match = ofp_parser.OFPMatch(in_port=in_port, eth_type=ether_types.ETH_TYPE_IP, ip_proto=6, ipv4_src=src,
-                                        ipv4_dst=dst, tcp_src=tcp_srcp, tcp_dst=tcp_dstp)
-            self.add_flow1(datapath=datapath, priority=1, match=match, idle_timeout=5, actions=actions, flags=0)
+        if isinstance(tcp_pkt, tcp.tcp):
+            tcp_srcp = tcp_pkt.src_port
+            tcp_dstp = tcp_pkt.dst_port
+            flow = (src, dst, tcp_srcp, tcp_dstp).__str__()
+            # out_port = ofproto_v1_3.OFPP_IN_PORT
+            # actions = [ofp_parser.OFPActionOutput(out_port, ofp.OFPCML_NO_BUFFER)]
+            # print('tcp packet {} in at {}'.format(flow,time.time()))
+            if datapath.id in self.localDatapathsRate.keys():
+                if self.initRole and out_port != ofp.OFPP_FLOOD and isinstance(tcp_pkt, tcp.tcp) and \
+                        self.dpFlowTableNum[datapath.id]['minTpPort'] != 0 and \
+                        TableNum[dpid] > self.dpFlowTableNum[dpid]['num'] > 0:
+                    # 流表未满，直接安装流表，并不统计
+                    print('just add flow {} when flow table num is {} at switch {}'.format(flow,
+                                                                                           self.dpFlowTableNum[dpid][
+                                                                                               'num'], dpid))
+                    self.dpFlowTableNum[dpid]['num'] += 1
+                    match = ofp_parser.OFPMatch(in_port=in_port, eth_type=ether_types.ETH_TYPE_IP, ip_proto=6,
+                                                ipv4_src=src,
+                                                ipv4_dst=dst, tcp_src=tcp_srcp, tcp_dst=tcp_dstp)
+                    self.add_flow1(datapath=datapath, priority=1, match=match, idle_timeout=5, actions=actions, flags=0)
+                    # self.localDatapathsRate[datapath.id].pop(flow)
 
-            # print('add flow at switch {}'.format(datapath.id))
-            # print('match : in_port={}, ipv4_dst={}, ipv4_src={}'.format(in_port, dst, src))
+                elif flow not in self.localDatapathsRate[datapath.id].keys():
+                    # 流表满了，新到的流先进行记录，不安装流表（但是会使得控制器的负载很大）
+                    flowDetail = {'lastPacketInCount': 0, 'packetInCount': 1, 'packetInRateWind': [], 'packetInRate': 0}
+                    self.localDatapathsRate[datapath.id][flow] = flowDetail
 
+                elif self.dpFlowTableNum[datapath.id]['minTpPort'] != -1 and \
+                        self.localDatapathsRate[datapath.id][flow]['packetInCount'] > 6 and \
+                        self.dpFlowTableNum[datapath.id]['minPacketRate'] < 4 and \
+                        self.localDatapathsRate[datapath.id][flow]['packetInRate'] > self.dpFlowTableNum[datapath.id][
+                    'minPacketRate'] + 5 and \
+                        self.dpFlowTableNum[dpid]['num'] >= TableNum[dpid]:
+                    # 交换机的流表已满，对交换机的流表进行过一次统计，并且本流的速率大于流表中最小的速率，
+                    start = time.time()
+
+                    result1 = os.system(
+                        'sudo ovs-ofctl --strict del-flows s{} "priority=1,tcp,in_port={},nw_src={},nw_dst={},tp_src={},tp_dst={}"'.format(
+                            datapath.id,
+                            self.dpFlowTableNum[datapath.id]['minInPort'],
+                            self.dpFlowTableNum[datapath.id]['srcIP'],
+                            self.dpFlowTableNum[datapath.id]['dstIP'],
+                            self.dpFlowTableNum[datapath.id]['minTpPort'],
+                            self.dpFlowTableNum[datapath.id]['minTpPort']))
+
+                    print('del flow port {} rate {}, add flow {} rate {},spend {} at switch {}'.format(
+                        self.dpFlowTableNum[datapath.id]['minTpPort'],
+                        self.dpFlowTableNum[datapath.id]['minPacketRate'],
+                        flow,
+                        self.localDatapathsRate[datapath.id][flow]['packetInRate'],
+                        time.time() - start,
+                        datapath.id))
+                    match = ofproto_v1_3_parser.OFPMatch(in_port=in_port, eth_type=ether_types.ETH_TYPE_IP, ip_proto=6,
+                                                         ipv4_src=src,
+                                                         ipv4_dst=dst, tcp_src=tcp_srcp, tcp_dst=tcp_dstp)
+                    self.add_flow1(datapath=datapath, priority=1, match=match, idle_timeout=5, actions=actions, flags=0)
+                    self.dpFlowTableNum[datapath.id]['minPacketRate'] = 100
+                    self.dpFlowTableNum[datapath.id]['minTpPort'] = 0
+                    self.localDatapathsRate[datapath.id].pop(flow)
+
+                else:
+                    self.localDatapathsRate[datapath.id][flow]['packetInCount'] = \
+                    self.localDatapathsRate[datapath.id][flow]['packetInCount'] + 1
+
+        # print('{}, packet in form {} to {} at {}'.format(self.packetInTime,src,dst,dpid))
 
         # if out_port != ofp.OFPP_FLOOD and isinstance(arp_pkt,arp.arp):
         #     # print('add flow at switch {}'.format(datapath.id))
@@ -938,10 +1083,7 @@ class PathForward(app_manager.RyuApp):
             return
         arp_pkt = pkt.get_protocol(arp.arp)
         ip_pkt = pkt.get_protocol(ipv4.ipv4)
-        # print(pkt)
-        # if datapath.id in self.localDatapathsRate.keys():
-        #     self.localDatapathsRate[datapath.id]['packetInCount'] = self.localDatapathsRate[datapath.id][
-        #                                                                 'packetInCount'] + 1
+
 
         if isinstance(arp_pkt, arp.arp):
             dst = arp_pkt.dst_ip
@@ -960,26 +1102,7 @@ class PathForward(app_manager.RyuApp):
         # time.sleep(hopDelay)
 
         actions = [ofp_parser.OFPActionOutput(out_port, ofp.OFPCML_NO_BUFFER)]
-        # if self.startMigration==False:
-        #     out_port = 1234
-        #     in_port = 1234
-        #     actions = [ofp_parser.OFPActionOutput(out_port,ofp.OFPCML_NO_BUFFER)]
-        #     match = ofp_parser.OFPMatch(in_port=in_port)
-        #     flags = ofp.OFPFF_SEND_FLOW_REM
-        #     self.add_flow1(datapath, 1, match, actions, flags=flags)
-        #     self.startMigration=True
-        # 如果执行的动作不是flood，那么此时应该依据流表项进行转发操作，所以需要添加流表到交换机
-        # if out_port != ofp.OFPP_FLOOD and isinstance(ip_pkt,ipv4.ipv4):
-        #     # print('add flow at switch {}'.format(datapath.id))
-        #     # print('match : in_port={}, ipv4_dst={}, ipv4_src={}'.format(in_port, dst, src))
-        #     match = ofp_parser.OFPMatch(in_port=in_port,eth_type=ether_types.ETH_TYPE_IP, ipv4_src=src, ipv4_dst=dst)
-        #     self.add_flow1(datapath=datapath, priority=1, match=match, actions=actions,flags=0)
 
-        # if out_port != ofp.OFPP_FLOOD and isinstance(arp_pkt,arp.arp):
-        #     # print('add flow at switch {}'.format(datapath.id))
-        #     # print('match : in_port={}, ipv4_dst={}, ipv4_src={}'.format(in_port, dst, src))
-        #     match = ofp_parser.OFPMatch(in_port=in_port,eth_type=ether_types.ETH_TYPE_ARP, arp_spa=src, arp_tpa=dst)
-        #     self.add_flow1(datapath=datapath, priority=1, match=match, idle_timeout=0,actions=actions,flags=0)
 
         data = None
         if msg.buffer_id == ofp.OFP_NO_BUFFER:
@@ -988,7 +1111,5 @@ class PathForward(app_manager.RyuApp):
         out = ofp_parser.OFPPacketOut(datapath=datapath, buffer_id=msg.buffer_id,
                                       in_port=in_port, actions=actions, data=data)
         datapath.send_msg(out)
-        # self.respondTime = time.time() - self.packetInTime + hopDelay
-        # if self.respondTime > 0.2:
-        #     print('will overload because respond time is {}'.format(self.respondTime))
+
 #         ryu-manager  shortest_path_forward_ygb_1.py --observe-links --ofp-tcp-listen-port=6653

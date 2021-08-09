@@ -25,6 +25,7 @@ The main component of OpenFlow controller.
 import contextlib
 import logging
 import random
+import time
 from socket import IPPROTO_TCP
 from socket import TCP_NODELAY
 from socket import SHUT_WR
