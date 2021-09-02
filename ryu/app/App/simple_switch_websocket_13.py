@@ -42,16 +42,15 @@ Get arp table:
 15:0c:de:49": 2}}}
 """
 
-from ryu.app import simple_switch_13
-from ryu.app.wsgi import ControllerBase
-from ryu.app.wsgi import rpc_public
-from ryu.app.wsgi import websocket
-from ryu.app.wsgi import WebSocketRPCServer
-from ryu.app.wsgi import WSGIApplication
+from ryu.app.App import simple_switch_13
+from ryu.app.App.wsgi import ControllerBase
+from ryu.app.App.wsgi import rpc_public
+from ryu.app.App.wsgi import websocket
+from ryu.app.App.wsgi import WebSocketRPCServer
+from ryu.app.App.wsgi import WSGIApplication
 from ryu.controller import ofp_event
 from ryu.controller.handler import set_ev_cls
 from ryu.lib.packet import packet
-
 
 simple_switch_instance_name = 'simple_switch_api_app'
 url = '/simpleswitch/ws'

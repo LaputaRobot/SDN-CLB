@@ -33,9 +33,9 @@ from ryu.lib import ofctl_v1_2
 from ryu.lib import ofctl_v1_3
 from ryu.lib import ofctl_v1_4
 from ryu.lib import ofctl_v1_5
-from ryu.app.wsgi import ControllerBase
-from ryu.app.wsgi import Response
-from ryu.app.wsgi import WSGIApplication
+from ryu.app.App.wsgi import ControllerBase
+from ryu.app.App.wsgi import Response
+from ryu.app.App.wsgi import WSGIApplication
 
 LOG = logging.getLogger('ryu.app.ofctl_rest')
 

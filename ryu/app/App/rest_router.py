@@ -21,9 +21,9 @@ import struct
 
 import json
 
-from ryu.app.wsgi import ControllerBase
-from ryu.app.wsgi import Response
-from ryu.app.wsgi import WSGIApplication
+from ryu.app.App.wsgi import ControllerBase
+from ryu.app.App.wsgi import Response
+from ryu.app.App.wsgi import WSGIApplication
 from ryu.base import app_manager
 from ryu.controller import dpset
 from ryu.controller import ofp_event
@@ -1892,8 +1892,6 @@ def mask_ntob(mask, err_msg=None):
 
 
 def ipv4_apply_mask(address, prefix_len, err_msg=None):
-    import itertools
-
     assert isinstance(address, str)
     address_int = ipv4_text_to_int(address)
     return ipv4_int_to_text(address_int & mask_ntob(prefix_len, err_msg))

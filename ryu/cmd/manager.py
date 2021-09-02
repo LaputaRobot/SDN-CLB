@@ -28,13 +28,9 @@ import logging
 from ryu import log
 log.early_init_log(logging.DEBUG)
 
-from ryu import flags
 from ryu import version
-from ryu.app import wsgi
+from ryu.app.App import wsgi
 from ryu.base.app_manager import AppManager
-from ryu.controller import controller
-from ryu.topology import switches
-
 
 CONF = cfg.CONF
 CONF.register_cli_opts([
